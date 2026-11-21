@@ -8,6 +8,7 @@ description: Add interactive Slack cards to NanoClaw agents. An agent posts a ca
 This skill adds a `post_card` tool for agents and the host code behind it.
 
 - The agent calls `post_card({ template, data })`. The host loads `cards/<template>.json` from one of the agent group's plugin folders, fills it with `data`, and posts it into the current Slack chat or thread.
+- In an `agent-shared` session the card goes to the session's routed chat, the same as other cards.
 - The person the agent is answering becomes the card's owner.
 - The template decides who may press each control: the owner, anyone, or members of one Slack user group. A control with no rule is owner-only. The agent cannot change the rules.
 - A control marked `submit` locks the card when an allowed person presses it. The card is redrawn without its controls and shows who submitted it and when.
@@ -18,7 +19,7 @@ The host stores each card in a `ui_cards` table in the central database.
 ## Prerequisites
 
 - Slack must be installed with `/add-slack` first. This skill uses its Slack client.
-- The fork's form-submit handler seam must be present in `src/channels/question-render-registry.ts`.
+- NanoClaw's form-submit handler seam must be present in `src/channels/question-render-registry.ts`.
 - The Slack app needs the `chat:write` scope. It needs `usergroups:read` only if a template uses a user-group rule.
 
 Check both code prerequisites. Each line must succeed; if one fails, stop and install what it names:
@@ -103,7 +104,7 @@ A template is a JSON file at `groups/<folder>/plugins/<plugin>/cards/<name>.json
   "data": {
     "title": { "type": "string", "required": true, "maxLength": 150 },
     "items": { "type": "array", "maxItems": 10, "items": {
-      "name": { "type": "string", "required": true }, "count": { "type": "number" } } }
+      "name": { "type": "string", "required": true, "maxLength": 60 }, "count": { "type": "number" } } }
   },
   "controls": {
     "pick":   { "who": "owner" },
@@ -128,11 +129,23 @@ A template is a JSON file at `groups/<folder>/plugins/<plugin>/cards/<name>.json
 - `{"$each": "<array path>", "as": "<name>", "do": <node>}` inside an array repeats `do` once per element. It can be nested.
 - `"$selected": "<data path>"` on an option ticks it at the start when that value is `true`.
 - Each `action_id` names a control. The host rewrites it to `ncu:<cardId>:<control>`.
+- An `action_id` must be a fixed string. A `{{...}}` placeholder in it is rejected, so data can never pick a control or its rule. Per-item buttons made with `$each` are not supported yet.
 - `controls` holds the rules. `who` is `"owner"`, `"anyone"` or `{ "group": "<Slack user group id>" }`. An element whose control has no entry is owner-only.
 - `submit: true` locks the card when an allowed person presses the control.
 - `notify` says whether a press sends the agent a `card_event`. It defaults to `true` for buttons and submit controls and to `false` for checkboxes and selects. Every `card_event` carries the card's current state, so a submit event holds the final ticks and choices.
 
 The agent sees presses as messages like `<webhook source="slack-ui" event="card_event">` whose payload holds `cardId`, `template`, `control`, `value`, `user`, `state` and `locked`.
+
+### Limits
+
+Slack rejects a card when one of these is too long:
+
+- option text: 75 characters
+- option value: 150 characters
+- button text: 75 characters
+- header text: 150 characters
+
+Set `maxLength` on every data field that feeds one of these. Without it, a long value makes the post fail with `invalid_blocks`.
 
 ## Troubleshooting
 
@@ -147,5 +160,6 @@ The agent sees presses as messages like `<webhook source="slack-ui" event="card_
 - The template is missing. The file must be at `groups/<folder>/plugins/<plugin>/cards/<name>.json` for the agent group that posts it.
 - The template is invalid, or the data does not match its `data` schema. The message lists the problems.
 - Slack is not configured for the chat's app instance, or the app lacks `chat:write`.
+- The reason ends in `invalid_blocks`. A filled value is too long for Slack, or the template is not valid Block Kit. Check the limits under Limits and set `maxLength` on the data fields.
 
 **Presses do nothing at all.** Only one process may hold a Slack app's Socket Mode connection. If another host or a test script uses the same app token, Slack sends the press to that process instead. Stop the other process, or give it its own app.
