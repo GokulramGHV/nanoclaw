@@ -283,6 +283,73 @@ describe('lockedBlocks', () => {
   });
 });
 
+describe('lockedBlocks limits', () => {
+  const at = new Date('2026-01-02T03:04:05.000Z');
+  const multi = (id: string, n: number, len = 10) => ({
+    type: 'actions',
+    elements: [
+      {
+        type: 'checkboxes',
+        action_id: id,
+        options: Array.from({ length: n }, (_, i) => opt(`v${i}`, `${'x'.repeat(len)}${i}`)),
+      },
+    ],
+  });
+
+  it('caps a Chosen line at 3000 chars, ending with an ellipsis', () => {
+    const blocks = [multi('p', 10, 500)];
+    const state = { p: Array.from({ length: 10 }, (_, i) => `v${i}`) };
+    const out = lockedBlocks(blocks, state, 'Submitted', 'U1', at) as any[];
+    expect(out[0].text.text.length).toBeLessThanOrEqual(3000);
+    expect(out[0].text.text.endsWith('\u2026')).toBe(true);
+  });
+
+  it('merges Chosen lines when over 50 blocks, and keeps context last', () => {
+    const sections = Array.from({ length: 45 }, (_, i) => ({
+      type: 'section',
+      text: { type: 'mrkdwn', text: `s${i}` },
+    }));
+    const blocks = [
+      ...sections,
+      multi('a', 2),
+      multi('b', 2),
+      multi('c', 2),
+      multi('d', 2),
+      multi('e', 2),
+      multi('f', 2),
+    ];
+    const state = { a: ['v0'], b: ['v1'], c: ['v0'], d: ['v1'], e: ['v0'], f: ['v1'] };
+    const out = lockedBlocks(blocks, state, 'Submitted', 'U1', at) as any[];
+    expect(out.length).toBeLessThanOrEqual(50);
+    expect(out[out.length - 1].type).toBe('context');
+    expect(out.filter((b) => b.text?.text?.startsWith('*Chosen')).length).toBe(1);
+    expect(JSON.stringify(out)).toContain('*Chosen (1):*');
+    expect(out.some((b) => (b.text?.text ?? '').includes('\n'))).toBe(true);
+  });
+
+  it('drops trailing content blocks when still over 50, keeping context last', () => {
+    const sections = Array.from({ length: 70 }, (_, i) => ({
+      type: 'section',
+      text: { type: 'mrkdwn', text: `s${i}` },
+    }));
+    const out = lockedBlocks(sections, {}, 'Submitted', 'U1', at) as any[];
+    expect(out.length).toBe(50);
+    expect(out[48].text.text).toBe('s48');
+    expect(out[49].type).toBe('context');
+  });
+});
+
+describe('stateFromPayload unsafe controls', () => {
+  it('skips __proto__, constructor and prototype', () => {
+    const mk = (c: string) => ({ action_id: `ncu:c:${c}`, type: 'plain_text_input', value: 'x' });
+    const raw = { actions: [mk('__proto__'), mk('constructor'), mk('prototype'), mk('ok')] };
+    const out = stateFromPayload(raw);
+    expect(Object.keys(out)).toEqual(['ok']);
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+    expect(({} as any).x).toBeUndefined();
+  });
+});
+
 describe('renderCard', () => {
   const template: CardTemplate = {
     version: 1,

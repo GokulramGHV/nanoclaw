@@ -11,6 +11,9 @@ type Obj = Record<string, unknown>;
 
 const PREFIX = 'ncu:';
 const MULTI_TYPES = new Set(['checkboxes', 'multi_static_select']);
+const UNSAFE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const MAX_SECTION_TEXT = 3000;
+const MAX_BLOCKS = 50;
 const SINGLE_TYPES = new Set(['static_select', 'radio_buttons']);
 
 function isObj(v: unknown): v is Obj {
@@ -89,7 +92,7 @@ export function stateFromPayload(raw: unknown): CardState {
     const parsed = parseActionId(id);
     if (!parsed) return;
     const v = elementValue(el);
-    if (v !== undefined) state[parsed.control] = v;
+    if (v !== undefined && !UNSAFE_KEYS.has(parsed.control)) state[parsed.control] = v;
   };
   try {
     if (!isObj(raw)) return {};
@@ -153,8 +156,15 @@ function chosenLine(el: Obj, state: Record<string, unknown>): Obj | null {
     .map((o) => escapeMrkdwn(String((isObj(o.text) && typeof o.text.text === 'string' ? o.text.text : o.value) ?? '')));
   return {
     type: 'section',
-    text: { type: 'mrkdwn', text: `*Chosen (${names.length}):* ${names.join(', ') || 'none'}` },
+    text: { type: 'mrkdwn', text: capText(`*Chosen (${names.length}):* `, names.join(', ') || 'none') },
   };
+}
+
+/** `prefix + body`, cut to Slack's section limit, ending with an ellipsis when cut. */
+function capText(prefix: string, body: string): string {
+  const full = prefix + body;
+  if (full.length <= MAX_SECTION_TEXT) return full;
+  return full.slice(0, MAX_SECTION_TEXT - 1) + '\u2026';
 }
 
 export function lockedBlocks(
@@ -164,7 +174,8 @@ export function lockedBlocks(
   userId: string,
   at: Date,
 ): unknown[] {
-  const out: unknown[] = [];
+  let out: unknown[] = [];
+  const chosen = new Set<unknown>();
   for (const b of blocks ?? []) {
     if (!isObj(b)) {
       out.push(clone(b));
@@ -173,15 +184,33 @@ export function lockedBlocks(
     if (b.type === 'actions') {
       for (const el of Array.isArray(b.elements) ? b.elements : []) {
         const line = isObj(el) ? chosenLine(el, state) : null;
-        if (line) out.push(line);
+        if (line) {
+          out.push(line);
+          chosen.add(line);
+        }
       }
       continue;
     }
     const { accessory, ...rest } = b;
     out.push(clone(rest));
     const line = isObj(accessory) ? chosenLine(accessory, state) : null;
-    if (line) out.push(line);
+    if (line) {
+      out.push(line);
+      chosen.add(line);
+    }
   }
+  if (out.length + 1 > MAX_BLOCKS && chosen.size > 1) {
+    const texts = out.filter((b) => chosen.has(b)).map((b) => ((b as Obj).text as Obj).text as string);
+    const merged = { type: 'section', text: { type: 'mrkdwn', text: capText('', texts.join('\n')) } };
+    let placed = false;
+    out = out.flatMap((b) => {
+      if (!chosen.has(b)) return [b];
+      if (placed) return [];
+      placed = true;
+      return [merged];
+    });
+  }
+  out = out.slice(0, MAX_BLOCKS - 1);
   const by = userId ? ` by <@${userId}>` : '';
   const stamp = `<!date^${Math.floor(at.getTime() / 1000)}^{time_secs}|${at.toISOString()}>`;
   out.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `${escapeMrkdwn(label)}${by} at ${stamp}` }] });
