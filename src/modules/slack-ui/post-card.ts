@@ -127,6 +127,7 @@ async function postCard(content: Record<string, unknown>, session: Session): Pro
     state: filled.initialState,
   });
 
+  let ts: string;
   try {
     const row = await getCard(cardId);
     if (!row) throw new PostCardError('card row missing after insert');
@@ -138,10 +139,29 @@ async function postCard(content: Record<string, unknown>, session: Session): Pro
       'post_card',
     );
     if (typeof res.ts !== 'string') throw new PostCardError('Slack did not return a message timestamp');
-    await setMessageTs(cardId, res.ts);
+    ts = res.ts;
   } catch (err) {
     await deleteCard(cardId).catch(() => {});
     throw err;
+  }
+
+  // Slack accepted the post: the message exists, so never delete the row or
+  // report failure from here on. Retry the save once, then leave it to the log.
+  const saveFailed = (err: unknown) =>
+    log.error('slack-ui: card posted but saving its message ts failed', {
+      cardId,
+      ts,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  try {
+    await setMessageTs(cardId, ts);
+  } catch (first) {
+    saveFailed(first);
+    try {
+      await setMessageTs(cardId, ts);
+    } catch (second) {
+      saveFailed(second);
+    }
   }
 }
 

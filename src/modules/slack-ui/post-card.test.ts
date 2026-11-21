@@ -26,12 +26,19 @@ import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { envValue } from '../../env.js';
 import { getDeliveryAction } from '../../delivery.js';
 import { resolveGroupFolderPath } from '../../group-folder.js';
+import { log } from '../../log.js';
 import { sessionDir } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 import { notifyAgent } from '../approvals/primitive.js';
-import { deleteCard, getCard, insertCard } from './db/ui-cards.js';
+import { getCard, insertCard, setMessageTs } from './db/ui-cards.js';
 import './index.js';
+import { parseTemplate } from './template.js';
 import { handlePostCard, readInboundSender } from './post-card.js';
+
+vi.mock('./db/ui-cards.js', async (orig) => {
+  const actual = await orig<typeof import('./db/ui-cards.js')>();
+  return { ...actual, setMessageTs: vi.fn(actual.setMessageTs) };
+});
 
 const call = vi.mocked(slackCall);
 const notify = vi.mocked(notifyAgent);
@@ -213,13 +220,24 @@ describe('post_card', () => {
     });
 
     it('reposts when an earlier attempt left a row without a message ts', async () => {
+      await insertCard({
+        id: 'card-1',
+        agentGroupId: 'ag-1',
+        sessionId: 'sess-1',
+        instance: 'slack',
+        channelId: 'C123',
+        threadTs: null,
+        ownerUserId: null,
+        templateName: 'demo-request',
+        template: parseTemplate(templateJson, 'demo-request'),
+        data: {},
+        state: {},
+      });
       await post();
-      const row = (await getCard('card-1'))!;
-      await deleteCard('card-1');
-      await insertCard({ ...row });
-      await post();
-      expect(call).toHaveBeenCalledTimes(2);
-      expect((await getCard('card-1'))?.messageTs).toBe('1700000000.000200');
+      expect(call).toHaveBeenCalledTimes(1);
+      const row = await getCard('card-1');
+      expect(row?.messageTs).toBe('1700000000.000200');
+      expect(row?.data).toEqual({ who: 'world', items: [{ name: 'a', selected: true }] });
       expect(notify).not.toHaveBeenCalled();
     });
   });
@@ -322,6 +340,26 @@ describe('post_card', () => {
       expect.anything(),
       'post_card failed: slack chat.postMessage failed: channel_not_found',
     );
+  });
+
+  it('keeps the row and does not notify when saving the ts fails once', async () => {
+    const save = vi.mocked(setMessageTs);
+    save.mockRejectedValueOnce(new Error('db busy'));
+    await post();
+    expect(save).toHaveBeenCalledTimes(2);
+    expect((await getCard('card-1'))?.messageTs).toBe('1700000000.000200');
+    expect(notify).not.toHaveBeenCalled();
+    expect(vi.mocked(log.error)).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ cardId: 'card-1', ts: '1700000000.000200' }),
+    );
+  });
+
+  it('keeps the row and does not notify when saving the ts fails twice', async () => {
+    vi.mocked(setMessageTs).mockRejectedValueOnce(new Error('db gone')).mockRejectedValueOnce(new Error('db gone'));
+    await post();
+    expect(await getCard('card-1')).toBeDefined();
+    expect(notify).not.toHaveBeenCalled();
   });
 
   it('an unexpected error is hidden behind a generic notice and never thrown', async () => {
