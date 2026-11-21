@@ -29,6 +29,15 @@ describe('ruleFor', () => {
     expect(ruleFor(t, 'missing')).toEqual({ who: 'owner' });
     expect(ruleFor(t, 'constructor')).toEqual({ who: 'owner' });
   });
+
+  it('returns a frozen default so a caller cannot widen it', () => {
+    const rule = ruleFor(tpl({}), 'missing');
+    expect(Object.isFrozen(rule)).toBe(true);
+    expect(() => {
+      (rule as { who: unknown }).who = 'anyone';
+    }).toThrow(TypeError);
+    expect(ruleFor(tpl({}), 'other')).toEqual({ who: 'owner' });
+  });
 });
 
 describe('canPress', () => {

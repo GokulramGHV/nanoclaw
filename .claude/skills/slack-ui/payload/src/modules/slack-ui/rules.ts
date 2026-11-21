@@ -7,7 +7,7 @@ import { slackCall } from '../../channels/slack-lib.js';
 import { log } from '../../log.js';
 import type { CardTemplate, ControlRule } from './template.js';
 
-const OWNER_ONLY: ControlRule = { who: 'owner' };
+const OWNER_ONLY: ControlRule = Object.freeze({ who: 'owner' });
 
 export function ruleFor(t: CardTemplate, control: string): ControlRule {
   const rules = t.controls;

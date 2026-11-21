@@ -40,10 +40,53 @@ function stripSlack(id: string): string {
   return id.startsWith('slack:') ? id.slice('slack:'.length) : id;
 }
 
+type InboundRow = { kind: string; content: string; seq: number | null; trigger: number };
+
+function parseContent(row: InboundRow): Record<string, unknown> | null {
+  try {
+    const content = JSON.parse(row.content) as unknown;
+    return typeof content === 'object' && content !== null && !Array.isArray(content)
+      ? (content as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function isCardEvent(row: InboundRow, content: Record<string, unknown> | null): boolean {
+  return row.kind === 'webhook' && content?.source === 'slack-ui' && content.event === 'card_event';
+}
+
+/** A row that can name an owner: a triggering chat message or slack-ui card_event. */
+function isOwnerRow(row: InboundRow): boolean {
+  if (row.trigger !== 1) return false;
+  return row.kind === 'chat' || row.kind === 'chat-sdk' || isCardEvent(row, parseContent(row));
+}
+
+/** The clicker for a slack-ui card_event row, else the chat sender. */
+function senderOf(row: InboundRow): string | null {
+  const content = parseContent(row);
+  if (!content) return null;
+  let id: unknown;
+  if (isCardEvent(row, content)) {
+    const payload = content.payload as { user?: { id?: unknown } } | undefined;
+    id = payload?.user?.id;
+  } else {
+    id = content.senderId;
+  }
+  if (typeof id !== 'string') return null;
+  const clean = stripSlack(id);
+  return clean === '' || clean === 'system' ? null : clean;
+}
+
 /**
- * Who sent the inbound message `messageId`: the clicker for a slack-ui
- * card_event row, else the chat sender. There is no mailbox API to read a
- * message by id, so this opens the session's inbound.db read-only. Never throws.
+ * Who the agent is answering, starting from the inbound message `messageId`
+ * (the container's in-reply-to, the first row of its batch). That row may be
+ * a context row (trigger=0) from a bystander, or not a chat message at all.
+ * Then the owner is the sender of the earliest later row that is a
+ * triggering chat message or slack-ui card_event. There is no mailbox API to
+ * read a message by id, so this opens the session's inbound.db read-only.
+ * Never throws.
  */
 export function readInboundSender(session: Session, messageId: unknown): string | null {
   if (typeof messageId !== 'string' || messageId === '') return null;
@@ -53,20 +96,23 @@ export function readInboundSender(session: Session, messageId: unknown): string 
       readonly: true,
       fileMustExist: true,
     });
-    const row = db.prepare('SELECT kind, content FROM messages_in WHERE id = ?').get(messageId) as
-      { kind: string; content: string } | undefined;
+    const row = db
+      .prepare('SELECT kind, content, seq, "trigger" AS trigger FROM messages_in WHERE id = ?')
+      .get(messageId) as InboundRow | undefined;
     if (!row) return null;
-    const content = JSON.parse(row.content) as Record<string, unknown>;
-    let id: unknown;
-    if (row.kind === 'webhook' && content.source === 'slack-ui' && content.event === 'card_event') {
-      const payload = content.payload as { user?: { id?: unknown } } | undefined;
-      id = payload?.user?.id;
-    } else {
-      id = content.senderId;
+    if (isOwnerRow(row)) return senderOf(row);
+    if (row.seq === null) return null;
+    const later = db
+      .prepare(
+        `SELECT kind, content, seq, "trigger" AS trigger FROM messages_in
+         WHERE seq > ? AND "trigger" = 1 AND kind IN ('chat', 'chat-sdk', 'webhook')
+         ORDER BY seq`,
+      )
+      .iterate(row.seq) as IterableIterator<InboundRow>;
+    for (const next of later) {
+      if (isOwnerRow(next)) return senderOf(next);
     }
-    if (typeof id !== 'string') return null;
-    const clean = stripSlack(id);
-    return clean === '' || clean === 'system' ? null : clean;
+    return null;
   } catch (err) {
     log.debug('slack-ui: could not read inbound sender', { err: err instanceof Error ? err.message : String(err) });
     return null;

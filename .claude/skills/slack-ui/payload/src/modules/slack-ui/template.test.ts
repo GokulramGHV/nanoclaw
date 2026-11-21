@@ -314,6 +314,23 @@ describe('parseTemplate', () => {
     expect(() => parseTemplate(JSON.stringify({ ...good, data: { a: { type: 'date' } } }), 'x')).toThrow(/type/);
     expect(() => parseTemplate(JSON.stringify({ ...good, blocks: [{ $each: 'a' }] }), 'x')).toThrow(/\$each/);
   });
+
+  it('rejects an action_id that takes a value from data', () => {
+    const button = (id: string) => ({ type: 'button', action_id: id, text: { type: 'plain_text', text: 'B' } });
+    const top = { ...good, blocks: [{ type: 'actions', elements: [button('go-{{name}}')] }] };
+    expect(() => parseTemplate(JSON.stringify(top), 'x')).toThrow(TemplateError);
+    expect(() => parseTemplate(JSON.stringify(top), 'x')).toThrow(
+      'template "x": blocks[0].elements[0].action_id must be a fixed string, not filled from data',
+    );
+    const each = {
+      ...good,
+      data: { items: { type: 'array', items: { id: { type: 'string' } } } },
+      blocks: [{ type: 'actions', elements: [{ $each: 'items', as: 'it', do: button('{{ it.id }}') }] }],
+    };
+    expect(() => parseTemplate(JSON.stringify(each), 'x')).toThrow(/blocks\[0\]\.elements\[0\]\.do\.action_id/);
+    const fixed = { ...good, blocks: [{ type: 'actions', elements: [button('go')] }] };
+    expect(() => parseTemplate(JSON.stringify(fixed), 'x')).not.toThrow();
+  });
 });
 
 describe('findTemplate', () => {
@@ -335,9 +352,9 @@ describe('findTemplate', () => {
   const body = JSON.stringify({ version: 1, text: 't', blocks: [] });
 
   it('finds a template under plugins/*/cards', async () => {
-    const dir = group({ 'plugins/pipeline-a/cards/demo-request.json': body, 'plugins/other/readme.md': 'x' });
+    const dir = group({ 'plugins/plugin-a/cards/demo-request.json': body, 'plugins/other/readme.md': 'x' });
     const found = await findTemplate(dir, 'demo-request');
-    expect(found.path).toBe(path.join(dir, 'plugins/pipeline-a/cards/demo-request.json'));
+    expect(found.path).toBe(path.join(dir, 'plugins/plugin-a/cards/demo-request.json'));
     expect(found.template.name).toBe('demo-request');
   });
 
@@ -356,14 +373,14 @@ describe('findTemplate', () => {
 
   it('errors when two plugins define the same name', async () => {
     const dir = group({
-      'plugins/pipeline-a/cards/demo-request.json': body,
-      'plugins/pipeline-b/cards/demo-request.json': body,
+      'plugins/plugin-a/cards/demo-request.json': body,
+      'plugins/plugin-b/cards/demo-request.json': body,
     });
     const err = await findTemplate(dir, 'demo-request').catch((e) => e);
     expect(err).toBeInstanceOf(TemplateError);
     expect(err.message).toMatch(/ambiguous/);
-    expect(err.message).toContain('pipeline-a');
-    expect(err.message).toContain('pipeline-b');
+    expect(err.message).toContain('plugin-a');
+    expect(err.message).toContain('plugin-b');
     expect(err.message).not.toContain(dir);
   });
 

@@ -20,12 +20,12 @@ import { requestWake } from '../../request-wake.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import { handleCardAction } from './clicks.js';
 import './db/migrations.js';
-import { getCard, insertCard, tryLock, updateState } from './db/ui-cards.js';
+import { getCard, insertCard, setMessageTs, tryLock, updateState } from './db/ui-cards.js';
 import type { CardTemplate } from './template.js';
 
 vi.mock('./db/ui-cards.js', async (orig) => {
   const actual = await orig<typeof import('./db/ui-cards.js')>();
-  return { ...actual, updateState: vi.fn(actual.updateState) };
+  return { ...actual, updateState: vi.fn(actual.updateState), setMessageTs: vi.fn(actual.setMessageTs) };
 });
 
 const call = vi.mocked(slackCall);
@@ -66,7 +66,7 @@ const template: CardTemplate = {
   ],
 };
 
-const newCard = async (over: Record<string, unknown> = {}) => {
+const insertBare = async (over: Record<string, unknown> = {}) => {
   await insertCard({
     id: 'c1',
     agentGroupId: 'ag-1',
@@ -81,6 +81,10 @@ const newCard = async (over: Record<string, unknown> = {}) => {
     state: { pick: ['a', 'b'] },
     ...over,
   });
+};
+
+const newCard = async (over: Record<string, unknown> = {}) => {
+  await insertBare(over);
   await import('./db/ui-cards.js').then((m) => m.setMessageTs('c1', '1700000001.000200'));
 };
 
@@ -91,14 +95,20 @@ function ev(actionId: string, opts: { user?: string; raw?: Record<string, unknow
     value: undefined,
     user: { userId: opts.user ?? 'U1', userName: 'alice', fullName: 'Alice A' },
     raw: {
-      action_ts: '111.1',
       channel: { id: 'C1' },
       container: { thread_ts: '1700000000.000100' },
-      actions: [{ action_id: actionId, type, value: 'v' }],
+      actions: [{ action_id: actionId, type, value: 'v', action_ts: '111.1' }],
       ...opts.raw,
     },
   } as unknown as ActionEvent;
 }
+
+const press = (actionId: string, actionTs?: string) => ({
+  action_id: actionId,
+  type: 'button',
+  value: 'v',
+  ...(actionTs ? { action_ts: actionTs } : {}),
+});
 
 const adapter = {} as Adapter;
 const methods = () => call.mock.calls.map((c) => c[1]);
@@ -171,7 +181,9 @@ describe('handleCardAction', () => {
           b1: { 'ncu:c1:pick': { type: 'checkboxes', selected_options: [{ value: 'a' }] } },
         },
       },
-      actions: [{ action_id: 'ncu:c1:pick', type: 'checkboxes', selected_options: [{ value: 'a' }] }],
+      actions: [
+        { action_id: 'ncu:c1:pick', type: 'checkboxes', selected_options: [{ value: 'a' }], action_ts: '111.1' },
+      ],
     };
     await handleCardAction(ev('ncu:c1:pick', { raw }), adapter, 'slack');
     expect((await getCard('c1'))!.state).toEqual({ pick: ['a'] });
@@ -229,7 +241,7 @@ describe('handleCardAction', () => {
     expect(write.mock.calls[0][2].threadId).toBeNull();
   });
 
-  it('submit locks, redraws the locked view, then notifies with merged state', async () => {
+  it('submit locks, notifies with merged state, then redraws the locked view', async () => {
     await newCard();
     const raw = {
       state: {
@@ -243,6 +255,9 @@ describe('handleCardAction', () => {
     expect(JSON.stringify(call.mock.calls[0][2])).toContain('Submitted');
     const payload = JSON.parse(write.mock.calls[0][2].content).payload;
     expect(payload).toMatchObject({ control: 'create', locked: true, state: { pick: ['b'] } });
+    const updateOrder = call.mock.invocationCallOrder[0];
+    expect(write.mock.invocationCallOrder[0]).toBeLessThan(updateOrder);
+    expect(wake.mock.invocationCallOrder[0]).toBeLessThan(updateOrder);
   });
 
   it('submit without touching the checkboxes sends the seeded state', async () => {
@@ -272,8 +287,8 @@ describe('handleCardAction', () => {
   it('two concurrent submits produce one lock', async () => {
     await newCard();
     const [a, b] = await Promise.all([
-      handleCardAction(ev('ncu:c1:create', { raw: { action_ts: '1.1' } }), adapter, 'slack'),
-      handleCardAction(ev('ncu:c1:create', { raw: { action_ts: '2.2' } }), adapter, 'slack'),
+      handleCardAction(ev('ncu:c1:create', { raw: { actions: [press('ncu:c1:create', '1.1')] } }), adapter, 'slack'),
+      handleCardAction(ev('ncu:c1:create', { raw: { actions: [press('ncu:c1:create', '2.2')] } }), adapter, 'slack'),
     ]);
     expect([a, b]).toEqual([true, true]);
     expect(write).toHaveBeenCalledTimes(1);
@@ -384,5 +399,90 @@ describe('fix round 1', () => {
     await handleCardAction(ev('ncu:c1:create'), adapter, 'slack');
     expect(methods()).toEqual(['chat.update']);
     expect(write).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('final review fixes', () => {
+  /** A write mock that rejects a repeated message id, like the real messages_in primary key. */
+  const uniqueWrites = () => {
+    const seen = new Set<string>();
+    write.mockImplementation(async (_g, _s, msg) => {
+      if (seen.has(msg.id)) throw new Error('UNIQUE constraint failed: messages_in.id');
+      seen.add(msg.id);
+    });
+  };
+
+  let clock: { mockRestore: () => void } | undefined;
+  const pinClock = (ms: number) => {
+    clock = vi.spyOn(Date, 'now').mockReturnValue(ms);
+  };
+
+  afterEach(() => {
+    clock?.mockRestore();
+    clock = undefined;
+  });
+
+  it('keys the agent message on the clicked action_ts inside actions[]', async () => {
+    await newCard();
+    const raw = { actions: [press('ncu:c1:other', '9.9'), press('ncu:c1:ok', '7.7')] };
+    await handleCardAction(ev('ncu:c1:ok', { raw }), adapter, 'slack');
+    expect(write.mock.calls[0][2].id).toBe('card-c1-7.7');
+  });
+
+  it('two different presses in the same millisecond both reach the agent', async () => {
+    await newCard();
+    pinClock(1_700_000_000_000);
+    uniqueWrites();
+    await handleCardAction(ev('ncu:c1:ok', { raw: { actions: [press('ncu:c1:ok', '5.1')] } }), adapter, 'slack');
+    await handleCardAction(ev('ncu:c1:ok', { raw: { actions: [press('ncu:c1:ok', '5.2')] } }), adapter, 'slack');
+    expect(write.mock.calls.map((c) => c[2].id)).toEqual(['card-c1-5.1', 'card-c1-5.2']);
+    expect(wake).toHaveBeenCalledTimes(2);
+  });
+
+  it('a redelivery with the same action_ts writes once', async () => {
+    await newCard();
+    uniqueWrites();
+    await handleCardAction(ev('ncu:c1:ok', { raw: { actions: [press('ncu:c1:ok', '5.1')] } }), adapter, 'slack');
+    await handleCardAction(ev('ncu:c1:ok', { raw: { actions: [press('ncu:c1:ok', '5.1')] } }), adapter, 'slack');
+    expect(wake).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to the clock when the press has no action_ts', async () => {
+    await newCard();
+    pinClock(1_700_000_000_123);
+    await handleCardAction(ev('ncu:c1:ok', { raw: { actions: [press('ncu:c1:ok')] } }), adapter, 'slack');
+    expect(write.mock.calls[0][2].id).toBe('card-c1-1700000000123');
+  });
+
+  it('still redraws a submitted card when telling the agent throws', async () => {
+    await newCard();
+    vi.mocked(getSession).mockRejectedValue(new Error('db down'));
+    expect(await handleCardAction(ev('ncu:c1:create'), adapter, 'slack')).toBe(true);
+    expect(methods()).toEqual(['chat.update']);
+    expect(JSON.stringify(call.mock.calls[0][2])).toContain('Submitted');
+  });
+
+  it('redraws a card with no stored ts using the message ts from the press, and saves it', async () => {
+    await insertBare();
+    const raw = { container: { thread_ts: '1700000000.000100', message_ts: '1700000009.000900' } };
+    await handleCardAction(ev('ncu:c1:create', { raw }), adapter, 'slack');
+    const update = call.mock.calls.find((c) => c[1] === 'chat.update');
+    expect(update?.[2]).toMatchObject({ channel: 'C1', ts: '1700000009.000900' });
+    expect((await getCard('c1'))!.messageTs).toBe('1700000009.000900');
+  });
+
+  it('uses the press message ts on a refused press too, and ignores a failed save', async () => {
+    await insertBare();
+    vi.mocked(setMessageTs).mockRejectedValueOnce(new Error('db busy'));
+    const raw = { container: { message_ts: '1700000009.000900' } };
+    expect(await handleCardAction(ev('ncu:c1:ok', { user: 'U2', raw }), adapter, 'slack')).toBe(true);
+    const update = call.mock.calls.find((c) => c[1] === 'chat.update');
+    expect(update?.[2]).toMatchObject({ ts: '1700000009.000900' });
+  });
+
+  it('skips the redraw when neither the card nor the press has a ts', async () => {
+    await insertBare();
+    await handleCardAction(ev('ncu:c1:ok', { user: 'U2' }), adapter, 'slack');
+    expect(methods()).toEqual(['chat.postEphemeral']);
   });
 });

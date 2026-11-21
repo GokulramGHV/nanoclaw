@@ -1,9 +1,10 @@
 /**
  * Click handling for `ncu:` cards: who may press, locking on submit, and
  * telling the agent. Order matters: load the card, check the rule (a group
- * rule may call Slack), `tryLock` for a submit control, then any Slack update,
- * then the agent message. Nothing is awaited between `tryLock` and the
- * decision to refuse the loser.
+ * rule may call Slack), `tryLock` for a submit control, then the agent
+ * message, then any Slack update. The agent message goes first so a failed
+ * or slow redraw can never lose a submit. Nothing is awaited between
+ * `tryLock` and the decision to refuse the loser.
  */
 import type { ActionEvent, Adapter } from 'chat';
 
@@ -14,7 +15,7 @@ import { envValue } from '../../env.js';
 import { log } from '../../log.js';
 import { requestWake } from '../../request-wake.js';
 import { writeSessionMessage } from '../../session-manager.js';
-import { getCard, tryLock, updateState, updateStateIfUnlocked, type UiCard } from './db/ui-cards.js';
+import { getCard, setMessageTs, tryLock, updateState, updateStateIfUnlocked, type UiCard } from './db/ui-cards.js';
 import { mergeState, parseActionId, renderCard, stateFromPayload, type CardState } from './render.js';
 import { canPress, createGroupCache, refusalText, ruleFor } from './rules.js';
 
@@ -75,16 +76,25 @@ async function ephemeral(
   }
 }
 
-async function redraw(token: string, card: UiCard): Promise<void> {
-  if (!card.messageTs) return;
+/**
+ * Redraw the card from stored state. A card whose ts was never saved uses the
+ * message ts from the press payload and saves it for next time.
+ */
+async function redraw(token: string, card: UiCard, raw: Obj): Promise<void> {
+  let ts = card.messageTs;
+  if (!ts) {
+    const fromPress = isObj(raw.container) ? raw.container.message_ts : undefined;
+    if (typeof fromPress !== 'string' || fromPress === '') return;
+    ts = fromPress;
+    try {
+      await setMessageTs(card.id, ts);
+    } catch (err) {
+      log.warn('slack-ui: saving message ts from a press failed', { card: card.id, err: errMsg(err) });
+    }
+  }
   try {
     const { text, blocks } = renderCard(card);
-    await slackCall(
-      token,
-      'chat.update',
-      { channel: card.channelId, ts: card.messageTs, text, blocks },
-      'slack-ui-update',
-    );
+    await slackCall(token, 'chat.update', { channel: card.channelId, ts, text, blocks }, 'slack-ui-update');
   } catch (err) {
     log.warn('slack-ui: chat.update failed', { card: card.id, err: errMsg(err) });
   }
@@ -96,6 +106,13 @@ function isDuplicate(err: unknown): boolean {
   return code === 'SQLITE_CONSTRAINT_PRIMARYKEY' || msg.includes('UNIQUE') || msg.includes('PRIMARY KEY');
 }
 
+/** The payload entry for the pressed control, else the first entry. */
+function clickedAction(raw: Obj, actionId: string): Obj | undefined {
+  const actions = Array.isArray(raw.actions) ? raw.actions : [];
+  const found = actions.find((a) => isObj(a) && a.action_id === actionId) ?? actions[0];
+  return isObj(found) ? found : undefined;
+}
+
 async function notifyAgent(
   card: UiCard,
   control: string,
@@ -105,15 +122,18 @@ async function notifyAgent(
   userId: string,
   locked: boolean,
 ): Promise<void> {
-  const firstAction = Array.isArray(raw.actions) && isObj(raw.actions[0]) ? raw.actions[0] : undefined;
-  const rawValue = firstAction && typeof firstAction.value === 'string' ? firstAction.value : null;
+  const clicked = clickedAction(raw, event.actionId);
+  const rawValue = clicked && typeof clicked.value === 'string' ? clicked.value : null;
   const value = Object.prototype.hasOwnProperty.call(merged, control) ? merged[control] : rawValue;
   const session = await getSession(card.sessionId);
   if (!session) {
     log.error('slack-ui: card session missing, no agent message sent', { card: card.id, session: card.sessionId });
     return;
   }
-  const actionTs = typeof raw.action_ts === 'string' && raw.action_ts ? raw.action_ts : String(Date.now());
+  // Slack puts action_ts on each entry of actions[], not on the payload. It
+  // keys the message id, so a redelivered press is written once.
+  const actionTs =
+    clicked && typeof clicked.action_ts === 'string' && clicked.action_ts ? clicked.action_ts : String(Date.now());
   try {
     await writeSessionMessage(card.agentGroupId, card.sessionId, {
       id: `card-${card.id}-${actionTs}`,
@@ -181,7 +201,7 @@ export async function handleCardAction(event: ActionEvent, _adapter: Adapter, in
     const rule = ruleFor(card.template, control);
     if (!(await canPress(rule, userId, card.ownerUserId, groupMembersFor(token)))) {
       await ephemeral(token, card.channelId, userId, threadTs, refusalText(rule, card.ownerUserId));
-      await redraw(token, card);
+      await redraw(token, card, raw);
       return true;
     }
 
@@ -199,9 +219,7 @@ export async function handleCardAction(event: ActionEvent, _adapter: Adapter, in
         await ephemeral(token, card.channelId, userId, threadTs, ALREADY_SUBMITTED);
         return true;
       }
-      const actions = Array.isArray(raw.actions) ? raw.actions : [];
-      const clicked = actions.find((a) => isObj(a) && a.action_id === event.actionId) ?? actions[0];
-      const isButton = isObj(clicked) && clicked.type === 'button';
+      const isButton = clickedAction(raw, event.actionId)?.type === 'button';
       if (rule.notify ?? isButton) await notifyAgent(card, control, merged, event, raw, userId, false);
       return true;
     }
@@ -222,8 +240,14 @@ export async function handleCardAction(event: ActionEvent, _adapter: Adapter, in
       lockedBy: userId,
       lockedAt: new Date().toISOString(),
     };
-    await redraw(token, lockedCard);
-    if (rule.notify !== false) await notifyAgent(card, control, merged, event, raw, userId, true);
+    if (rule.notify !== false) {
+      try {
+        await notifyAgent(card, control, merged, event, raw, userId, true);
+      } catch (err) {
+        log.error('slack-ui: telling the agent about a submit failed', { card: card.id, err: errMsg(err) });
+      }
+    }
+    await redraw(token, lockedCard, raw);
     return true;
   } catch (err) {
     log.error('slack-ui: card action failed', { card: cardId, err: errMsg(err) });

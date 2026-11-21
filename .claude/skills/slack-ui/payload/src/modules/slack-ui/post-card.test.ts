@@ -27,6 +27,7 @@ import { envValue } from '../../env.js';
 import { getDeliveryAction } from '../../delivery.js';
 import { resolveGroupFolderPath } from '../../group-folder.js';
 import { log } from '../../log.js';
+import { INBOUND_SCHEMA } from '../../mailbox/sqlite/schema.js';
 import { sessionDir } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 import { notifyAgent } from '../approvals/primitive.js';
@@ -95,12 +96,27 @@ function mkdir(): string {
   return d;
 }
 
-function seedInbound(rows: Array<{ id: string; kind: string; content: string }>): void {
+type SeedRow = { id: string; kind: string; content: string; trigger?: 0 | 1; seq?: number };
+
+/** Seeds rows into a real inbound.db schema. seq defaults to even numbers in row order. */
+function seedInbound(rows: SeedRow[]): void {
   const db = new Database(path.join(sessDir, 'inbound.db'));
-  db.exec('CREATE TABLE IF NOT EXISTS messages_in (id TEXT PRIMARY KEY, kind TEXT, content TEXT)');
-  for (const r of rows) db.prepare('INSERT INTO messages_in VALUES (?, ?, ?)').run(r.id, r.kind, r.content);
+  db.exec(INBOUND_SCHEMA);
+  const insert = db.prepare(
+    'INSERT INTO messages_in (id, seq, kind, timestamp, "trigger", content) VALUES (?, ?, ?, ?, ?, ?)',
+  );
+  rows.forEach((r, i) =>
+    insert.run(r.id, r.seq ?? (i + 1) * 2, r.kind, '2026-01-01T00:00:00.000Z', r.trigger ?? 1, r.content),
+  );
   db.close();
 }
+
+const chatRow = (id: string, sender: string, over: Partial<SeedRow> = {}): SeedRow => ({
+  id,
+  kind: 'chat',
+  content: JSON.stringify({ text: 'x', senderId: sender }),
+  ...over,
+});
 
 const post = (over: Record<string, unknown> = {}, s: Session = session) =>
   handlePostCard(
@@ -119,8 +135,8 @@ beforeEach(async () => {
   vi.clearAllMocks();
   groupDir = mkdir();
   sessDir = mkdir();
-  fs.mkdirSync(path.join(groupDir, 'plugins/pipeline-a/cards'), { recursive: true });
-  fs.writeFileSync(path.join(groupDir, 'plugins/pipeline-a/cards/demo-request.json'), templateJson);
+  fs.mkdirSync(path.join(groupDir, 'plugins/plugin-a/cards'), { recursive: true });
+  fs.writeFileSync(path.join(groupDir, 'plugins/plugin-a/cards/demo-request.json'), templateJson);
   vi.mocked(resolveGroupFolderPath).mockReturnValue(groupDir);
   vi.mocked(sessionDir).mockReturnValue(sessDir);
   vi.mocked(getAgentGroup).mockResolvedValue({ id: 'ag-1', folder: 'g1' } as never);
@@ -261,6 +277,24 @@ describe('post_card', () => {
       expect((await getCard('card-1'))?.ownerUserId).toBe('U77');
     });
 
+    it('skips a context row from someone else and takes the next triggering sender', async () => {
+      seedInbound([chatRow('ctx', 'slack:UY', { trigger: 0 }), chatRow('trig', 'slack:UX')]);
+      await post({ inReplyTo: 'ctx' });
+      expect((await getCard('card-1'))?.ownerUserId).toBe('UX');
+    });
+
+    it('is the triggering row sender when inReplyTo is that row', async () => {
+      seedInbound([chatRow('ctx', 'slack:UY', { trigger: 0 }), chatRow('trig', 'slack:UX')]);
+      await post({ inReplyTo: 'trig' });
+      expect((await getCard('card-1'))?.ownerUserId).toBe('UX');
+    });
+
+    it('is null when no triggering row follows a context row', async () => {
+      seedInbound([chatRow('old', 'slack:UX'), chatRow('ctx', 'slack:UY', { trigger: 0 })]);
+      await post({ inReplyTo: 'ctx' });
+      expect((await getCard('card-1'))?.ownerUserId).toBeNull();
+    });
+
     it('is null without inReplyTo', async () => {
       await post();
       expect((await getCard('card-1'))?.ownerUserId).toBeNull();
@@ -394,5 +428,43 @@ describe('readInboundSender', () => {
   it('passes a bare Slack id through unchanged', () => {
     seedInbound([{ id: 'u', kind: 'chat', content: JSON.stringify({ senderId: 'U9' }) }]);
     expect(readInboundSender(session, 'u')).toBe('U9');
+  });
+});
+
+describe('readInboundSender row choice', () => {
+  const cardEvent = (id: string, user: string, over: Partial<SeedRow> = {}): SeedRow => ({
+    id,
+    kind: 'webhook',
+    content: JSON.stringify({ source: 'slack-ui', event: 'card_event', payload: { user: { id: user } } }),
+    ...over,
+  });
+
+  it('skips a row of another kind and later rows that are not chat or a card event', () => {
+    seedInbound([
+      { id: 'task', kind: 'task', content: JSON.stringify({ prompt: 'p' }) },
+      { id: 'hook', kind: 'webhook', content: JSON.stringify({ source: 'other', senderId: 'UH' }) },
+      chatRow('ctx', 'UY', { trigger: 0 }),
+      { id: 'sdk', kind: 'chat-sdk', content: JSON.stringify({ senderId: 'slack:UX' }) },
+    ]);
+    expect(readInboundSender(session, 'task')).toBe('UX');
+  });
+
+  it('accepts a later slack-ui card event as the triggering row', () => {
+    seedInbound([chatRow('ctx', 'UY', { trigger: 0 }), cardEvent('click', 'UC')]);
+    expect(readInboundSender(session, 'ctx')).toBe('UC');
+  });
+
+  it('takes the earliest triggering row by seq, not by insert order', () => {
+    seedInbound([
+      chatRow('ctx', 'UY', { trigger: 0, seq: 2 }),
+      chatRow('late', 'UL', { seq: 8 }),
+      chatRow('early', 'UE', { seq: 4 }),
+    ]);
+    expect(readInboundSender(session, 'ctx')).toBe('UE');
+  });
+
+  it('ignores triggering rows that came before the inReplyTo row', () => {
+    seedInbound([chatRow('before', 'UB', { seq: 2 }), chatRow('ctx', 'UY', { trigger: 0, seq: 4 })]);
+    expect(readInboundSender(session, 'ctx')).toBeNull();
   });
 });

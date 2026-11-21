@@ -418,6 +418,33 @@ describe('renderCard', () => {
     );
   });
 
+  it('escapes option text once in the locked view, whether mrkdwn or plain', () => {
+    const mixed: CardTemplate = {
+      ...template,
+      blocks: [
+        {
+          type: 'actions',
+          elements: [
+            {
+              type: 'checkboxes',
+              action_id: 'pick',
+              options: [
+                { $each: 'items', as: 'it', do: { text: { type: 'mrkdwn', text: '{{it.name}}' }, value: 'm' } },
+                { text: { type: 'plain_text', text: 'C & D' }, value: 'p' },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+    const { blocks } = renderCard(
+      card({ template: mixed, data: { items: [{ name: 'A & B' }] }, state: { pick: ['m', 'p'] }, locked: true }),
+    ) as { blocks: any[] };
+    const json = JSON.stringify(blocks);
+    expect(json).toContain('*Chosen (2):* A &amp; B, C &amp; D');
+    expect(json).not.toContain('&amp;amp;');
+  });
+
   it('lets TemplateError propagate', () => {
     expect(() =>
       renderCard(card({ template: { ...template, text: 'x', blocks: new Array(60).fill({ type: 'divider' }) } })),

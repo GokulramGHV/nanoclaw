@@ -144,6 +144,25 @@ function checkEach(node: unknown, where: string, inArray: boolean, problems: str
   for (const [k, v] of Object.entries(node)) checkEach(v, `${where}.${k}`, false, problems);
 }
 
+/**
+ * Every `action_id` must be a fixed string. A placeholder would let agent data
+ * pick the control name, and so its press rule.
+ */
+function checkActionIds(node: unknown, where: string, problems: string[]): void {
+  if (Array.isArray(node)) {
+    node.forEach((m, i) => checkActionIds(m, `${where}[${i}]`, problems));
+    return;
+  }
+  if (!isObj(node)) return;
+  for (const [k, v] of Object.entries(node)) {
+    if (k === 'action_id' && typeof v === 'string' && v.includes('{{')) {
+      problems.push(`${where}.action_id must be a fixed string, not filled from data`);
+    } else {
+      checkActionIds(v, `${where}.${k}`, problems);
+    }
+  }
+}
+
 export function parseTemplate(json: string, name: string): CardTemplate {
   let raw: unknown;
   try {
@@ -159,7 +178,10 @@ export function parseTemplate(json: string, name: string): CardTemplate {
   checkFieldSpecs(raw.data ?? {}, 'data', problems);
   checkControls(raw.controls ?? {}, problems);
   if (!Array.isArray(raw.blocks)) problems.push('blocks must be an array');
-  else checkEach(raw.blocks, 'blocks', true, problems);
+  else {
+    checkEach(raw.blocks, 'blocks', true, problems);
+    checkActionIds(raw.blocks, 'blocks', problems);
+  }
   if (problems.length > 0) throw new TemplateError(problems.map((p) => `template "${name}": ${p}`));
 
   return {

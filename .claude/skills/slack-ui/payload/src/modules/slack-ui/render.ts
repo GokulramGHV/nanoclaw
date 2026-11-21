@@ -146,6 +146,16 @@ export function applyState(blocks: unknown[], state: Record<string, unknown>): u
   return clone(mapElements(blocks, (el) => applyToElement(el, state)));
 }
 
+/**
+ * Option text for a mrkdwn line. Fill already escaped mrkdwn and markdown
+ * text; plain text and the value fallback are escaped here.
+ */
+function optionLabel(o: Obj): string {
+  const text = isObj(o.text) && typeof o.text.text === 'string' ? o.text : undefined;
+  if (text && (text.type === 'mrkdwn' || text.type === 'markdown')) return text.text as string;
+  return escapeMrkdwn(String((text ? text.text : o.value) ?? ''));
+}
+
 function chosenLine(el: Obj, state: Record<string, unknown>): Obj | null {
   if (typeof el.type !== 'string' || !MULTI_TYPES.has(el.type)) return null;
   const control = controlOf(el.action_id);
@@ -153,7 +163,7 @@ function chosenLine(el: Obj, state: Record<string, unknown>): Obj | null {
   const picked = isStringArray(v) ? v : [];
   const names = optionsOf(el)
     .filter((o) => typeof o.value === 'string' && picked.includes(o.value))
-    .map((o) => escapeMrkdwn(String((isObj(o.text) && typeof o.text.text === 'string' ? o.text.text : o.value) ?? '')));
+    .map(optionLabel);
   return {
     type: 'section',
     text: { type: 'mrkdwn', text: capText(`*Chosen (${names.length}):* `, names.join(', ') || 'none') },
