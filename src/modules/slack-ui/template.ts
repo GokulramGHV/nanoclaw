@@ -35,8 +35,8 @@ export interface CardTemplate {
 
 export class TemplateError extends Error {
   readonly problems: string[];
-  constructor(problems: string[]) {
-    super(problems.join('; '));
+  constructor(problems: string[], options?: { cause?: unknown }) {
+    super(problems.join('; '), options);
     this.name = 'TemplateError';
     this.problems = problems;
   }
@@ -47,6 +47,7 @@ const DEFAULT_MAX_LENGTH = 3000;
 const DEFAULT_MAX_ITEMS = 50;
 const MAX_BLOCKS = 50;
 const MAX_TEXT = 3000;
+const MAX_MARKDOWN_TEXT = 12000;
 const MAX_CHECKBOX_OPTIONS = 10;
 const MAX_ACTIONS_ELEMENTS = 25;
 
@@ -148,7 +149,7 @@ export function parseTemplate(json: string, name: string): CardTemplate {
   try {
     raw = JSON.parse(json);
   } catch (err) {
-    throw new TemplateError([`template "${name}" is not valid JSON: ${(err as Error).message}`]);
+    throw new TemplateError([`template "${name}" is not valid JSON: ${(err as Error).message}`], { cause: err });
   }
   if (!isObj(raw)) throw new TemplateError([`template "${name}" must be a JSON object`]);
 
@@ -179,7 +180,8 @@ export async function findTemplate(groupDir: string, name: string): Promise<{ te
   try {
     plugins = (await fs.readdir(pluginsDir)).sort();
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT') throw new TemplateError([`cannot list plugins (${code ?? 'error'})`], { cause: err });
   }
 
   const found: Array<{ plugin: string; path: string; json: string }> = [];
@@ -190,7 +192,9 @@ export async function findTemplate(groupDir: string, name: string): Promise<{ te
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'ENOENT' || code === 'ENOTDIR') continue;
-      throw new TemplateError([`cannot read card template "${name}" in plugin "${plugin}" (${code ?? 'error'})`]);
+      throw new TemplateError([`cannot read card template "${name}" in plugin "${plugin}" (${code ?? 'error'})`], {
+        cause: err,
+      });
     }
   }
 
@@ -205,7 +209,10 @@ export async function findTemplate(groupDir: string, name: string): Promise<{ te
     template = parseTemplate(found[0].json, name);
   } catch (err) {
     if (err instanceof TemplateError) {
-      throw new TemplateError(err.problems.map((p) => `${p} (plugin "${found[0].plugin}")`));
+      throw new TemplateError(
+        err.problems.map((p) => `${p} (plugin "${found[0].plugin}")`),
+        { cause: err.cause ?? err },
+      );
     }
     throw err;
   }
@@ -371,8 +378,9 @@ function checkLimits(node: unknown, where: string, problems: string[]): void {
     return;
   }
   if (!isObj(node)) return;
-  if (isTextObject(node) && node.type !== 'markdown' && node.text.length > MAX_TEXT) {
-    problems.push(`${where}: text is ${node.text.length} characters (max ${MAX_TEXT})`);
+  const maxText = node.type === 'markdown' ? MAX_MARKDOWN_TEXT : MAX_TEXT;
+  if (isTextObject(node) && node.text.length > maxText) {
+    problems.push(`${where}: text is ${node.text.length} characters (max ${maxText})`);
   }
   if (node.type === 'checkboxes' && Array.isArray(node.options) && node.options.length > MAX_CHECKBOX_OPTIONS) {
     problems.push(`${where}: ${node.options.length} checkbox options (max ${MAX_CHECKBOX_OPTIONS})`);

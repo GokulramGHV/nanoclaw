@@ -158,6 +158,12 @@ describe('fillTemplate', () => {
     expect((out.blocks[0] as any).text).toBe('x &lt;!channel&gt;');
   });
 
+  it('caps markdown block text at 12000 characters', () => {
+    const md = () => tpl({ blocks: [{ type: 'markdown', text: '{{v}}' }] });
+    expect(() => fillTemplate(md(), { v: 'x'.repeat(12000) })).not.toThrow();
+    expect(() => fillTemplate(md(), { v: 'x'.repeat(12001) })).toThrow(/12001/);
+  });
+
   it('removes the block holding an empty text, and cascades to emptied containers', () => {
     const t = tpl({
       blocks: [
@@ -369,5 +375,23 @@ describe('findTemplate', () => {
       expect(err).toBeInstanceOf(TemplateError);
       expect(err.message).not.toContain(dir);
     }
+  });
+
+  it('keeps the original error as cause, including for bad JSON', async () => {
+    const dir = group({ 'plugins/p/cards/bad-json.json': '{nope' });
+    const err = await findTemplate(dir, 'bad-json').catch((e) => e);
+    expect(err).toBeInstanceOf(TemplateError);
+    expect(err.cause).toBeInstanceOf(SyntaxError);
+    fs.mkdirSync(path.join(dir, 'plugins/p/cards/a-dir.json'));
+    const err2 = await findTemplate(dir, 'a-dir').catch((e) => e);
+    expect(err2.cause).toBeInstanceOf(Error);
+  });
+
+  it('wraps a plugins/ listing failure without an absolute path', async () => {
+    const dir = group({ plugins: 'not a directory' });
+    const err = await findTemplate(dir, 'demo-request').catch((e) => e);
+    expect(err).toBeInstanceOf(TemplateError);
+    expect(err.message).not.toContain(dir);
+    expect(err.cause).toBeInstanceOf(Error);
   });
 });
