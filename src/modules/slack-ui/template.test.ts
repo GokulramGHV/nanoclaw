@@ -143,14 +143,19 @@ describe('fillTemplate', () => {
         },
       ],
     });
-    const v = '<!channel> & @here <@U1>';
+    const v = '<!channel> & @here @HERE <@U1>';
     const out = fillTemplate(t, { v });
-    const escaped = '&lt;!channel&gt; &amp; @⁠here &lt;@U1&gt;';
+    const escaped = '&lt;!channel&gt; &amp; @\u2060here @\u2060HERE &lt;@U1&gt;';
     expect((out.blocks[0] as any).text.text).toBe(`*${escaped}* <b>`);
     expect((out.blocks[1] as any).text.text).toBe(v);
     expect((out.blocks[2] as any).elements[0].value).toBe(v);
     expect(out.text).toBe(`T ${escaped}`);
     expect(escapeMrkdwn(v)).toBe(escaped);
+  });
+
+  it('escapes substituted values in markdown blocks', () => {
+    const out = fillTemplate(tpl({ blocks: [{ type: 'markdown', text: 'x {{v}}' }] }), { v: '<!channel>' });
+    expect((out.blocks[0] as any).text).toBe('x &lt;!channel&gt;');
   });
 
   it('removes the block holding an empty text, and cascades to emptied containers', () => {
@@ -263,6 +268,12 @@ describe('validateData', () => {
     return [];
   };
 
+  it('defaults array maxItems to 50', () => {
+    const t2 = tpl({ data: { xs: { type: 'array', items: { a: { type: 'string' } } } } });
+    expect(() => validateData(t2, { xs: Array.from({ length: 50 }, () => ({})) })).not.toThrow();
+    expect(() => validateData(t2, { xs: Array.from({ length: 51 }, () => ({})) })).toThrow(/maxItems 50/);
+  });
+
   it('lists an unknown key', () => expect(problemsOf({ title: 'a', extra: 1 })).toEqual(['unknown field "extra"']));
   it('lists a missing required field', () => expect(problemsOf({})).toEqual(['missing required field "title"']));
   it('lists a wrong type', () => expect(problemsOf({ title: 'a', n: 'x' })).toEqual(['field "n" must be a number']));
@@ -342,6 +353,21 @@ describe('findTemplate', () => {
       'plugins/pipeline-a/cards/demo-request.json': body,
       'plugins/pipeline-b/cards/demo-request.json': body,
     });
-    await expect(findTemplate(dir, 'demo-request')).rejects.toThrow(/ambiguous/);
+    const err = await findTemplate(dir, 'demo-request').catch((e) => e);
+    expect(err).toBeInstanceOf(TemplateError);
+    expect(err.message).toMatch(/ambiguous/);
+    expect(err.message).toContain('pipeline-a');
+    expect(err.message).toContain('pipeline-b');
+    expect(err.message).not.toContain(dir);
+  });
+
+  it('wraps read and parse failures in TemplateError without absolute paths', async () => {
+    const dir = group({ 'plugins/p/cards/bad-json.json': '{nope' });
+    fs.mkdirSync(path.join(dir, 'plugins/p/cards/a-dir.json'), { recursive: true });
+    for (const n of ['bad-json', 'a-dir']) {
+      const err = await findTemplate(dir, n).catch((e) => e);
+      expect(err).toBeInstanceOf(TemplateError);
+      expect(err.message).not.toContain(dir);
+    }
   });
 });

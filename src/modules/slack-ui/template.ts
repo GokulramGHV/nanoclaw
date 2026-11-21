@@ -44,6 +44,7 @@ export class TemplateError extends Error {
 
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const DEFAULT_MAX_LENGTH = 3000;
+const DEFAULT_MAX_ITEMS = 50;
 const MAX_BLOCKS = 50;
 const MAX_TEXT = 3000;
 const MAX_CHECKBOX_OPTIONS = 10;
@@ -65,7 +66,7 @@ export function escapeMrkdwn(s: string): string {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
-    .replace(/@(here|channel|everyone)\b/gi, '@⁠$1');
+    .replace(/@(here|channel|everyone)\b/gi, '@\u2060$1');
 }
 
 // ── parse ───────────────────────────────────────────────────────────────────
@@ -181,22 +182,34 @@ export async function findTemplate(groupDir: string, name: string): Promise<{ te
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
 
-  const found: Array<{ path: string; json: string }> = [];
+  const found: Array<{ plugin: string; path: string; json: string }> = [];
   for (const plugin of plugins) {
     const file = path.join(pluginsDir, plugin, 'cards', `${name}.json`);
     try {
-      found.push({ path: file, json: await fs.readFile(file, 'utf8') });
+      found.push({ plugin, path: file, json: await fs.readFile(file, 'utf8') });
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
-      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err;
+      if (code === 'ENOENT' || code === 'ENOTDIR') continue;
+      throw new TemplateError([`cannot read card template "${name}" in plugin "${plugin}" (${code ?? 'error'})`]);
     }
   }
 
   if (found.length === 0) throw new TemplateError([`no card template "${name}" in any plugin`]);
   if (found.length > 1) {
-    throw new TemplateError([`card template "${name}" is ambiguous: ${found.map((f) => f.path).join(', ')}`]);
+    throw new TemplateError([
+      `card template "${name}" is ambiguous: in plugins ${found.map((f) => f.plugin).join(', ')}`,
+    ]);
   }
-  return { template: parseTemplate(found[0].json, name), path: found[0].path };
+  let template: CardTemplate;
+  try {
+    template = parseTemplate(found[0].json, name);
+  } catch (err) {
+    if (err instanceof TemplateError) {
+      throw new TemplateError(err.problems.map((p) => `${p} (plugin "${found[0].plugin}")`));
+    }
+    throw err;
+  }
+  return { template, path: found[0].path };
 }
 
 // ── validate ────────────────────────────────────────────────────────────────
@@ -234,8 +247,8 @@ function validateObject(specs: Record<string, FieldSpec>, value: unknown, where:
         break;
       case 'array':
         if (!Array.isArray(v)) problems.push(`field "${at(key)}" must be an array`);
-        else if (spec.maxItems !== undefined && v.length > spec.maxItems) {
-          problems.push(`field "${at(key)}" exceeds maxItems ${spec.maxItems}`);
+        else if (v.length > (spec.maxItems ?? DEFAULT_MAX_ITEMS)) {
+          problems.push(`field "${at(key)}" exceeds maxItems ${spec.maxItems ?? DEFAULT_MAX_ITEMS}`);
         } else {
           out[key] = v.map((item, i) => validateObject(spec.items ?? {}, item, `${at(key)}[${i}]`, problems));
         }
@@ -280,8 +293,8 @@ function substitute(s: string, scope: Obj, escape: boolean): string {
   });
 }
 
-function isTextObject(n: Obj): n is Obj & { type: 'plain_text' | 'mrkdwn'; text: string } {
-  return (n.type === 'plain_text' || n.type === 'mrkdwn') && typeof n.text === 'string';
+function isTextObject(n: Obj): n is Obj & { type: 'plain_text' | 'mrkdwn' | 'markdown'; text: string } {
+  return (n.type === 'plain_text' || n.type === 'mrkdwn' || n.type === 'markdown') && typeof n.text === 'string';
 }
 
 function isEach(n: unknown): n is { $each: string; as: string; do: unknown } {
@@ -308,7 +321,7 @@ function fillArray(arr: unknown[], scope: Obj, ctx: FillCtx): unknown[] {
 
 function fillObject(node: Obj, scope: Obj, ctx: FillCtx): unknown {
   if (isTextObject(node)) {
-    const text = substitute(node.text, scope, node.type === 'mrkdwn');
+    const text = substitute(node.text, scope, node.type !== 'plain_text');
     return text.trim() === '' ? EMPTY : { ...node, text };
   }
 
@@ -358,7 +371,7 @@ function checkLimits(node: unknown, where: string, problems: string[]): void {
     return;
   }
   if (!isObj(node)) return;
-  if (isTextObject(node) && node.text.length > MAX_TEXT) {
+  if (isTextObject(node) && node.type !== 'markdown' && node.text.length > MAX_TEXT) {
     problems.push(`${where}: text is ${node.text.length} characters (max ${MAX_TEXT})`);
   }
   if (node.type === 'checkboxes' && Array.isArray(node.options) && node.options.length > MAX_CHECKBOX_OPTIONS) {
