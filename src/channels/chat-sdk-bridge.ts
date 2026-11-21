@@ -35,7 +35,7 @@ import { cardProblems, isCardPart, isRecord, type CardPart } from './card-parts.
 import { CardTooLongError, cardQuestionTooLong, normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, HistoryLine, InboundMessage } from './adapter.js';
 import { INSTANCE_KEY_RE } from './channel-registry.js';
-import { resolveQuestionRender, dispatchQuestionAction } from './question-render-registry.js';
+import { resolveQuestionRender, dispatchQuestionAction, dispatchModalSubmit } from './question-render-registry.js';
 
 /** Adapter with optional gateway support (e.g., Discord). */
 interface GatewayAdapter extends Adapter {
@@ -1069,6 +1069,9 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           inviterId: event.inviterId,
         });
       });
+
+      // Form (modal) submits go to module handlers; the SDK drops them otherwise.
+      chat.onModalSubmit((event) => dispatchModalSubmit(event, adapter, instanceKey));
 
       // Handle button clicks (ask_user_question)
       chat.onAction(async (event) => {

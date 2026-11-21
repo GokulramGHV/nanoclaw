@@ -4,7 +4,12 @@ import { closeDb, initTestDb } from '../db/connection.js';
 import { runMigrations } from '../db/migrations/index.js';
 import { createPendingApproval } from '../db/sessions.js';
 import { log } from '../log.js';
-import { registerQuestionRenderResolver, resolveQuestionRender } from './question-render-registry.js';
+import {
+  dispatchModalSubmit,
+  registerModalSubmitHandler,
+  registerQuestionRenderResolver,
+  resolveQuestionRender,
+} from './question-render-registry.js';
 
 beforeEach(async () => {
   const db = await initTestDb();
@@ -112,5 +117,51 @@ describe('question render resolver registry', () => {
 
   it('returns undefined when neither a module nor the built-in fallback owns the id', async () => {
     expect(await resolveQuestionRender('unowned-render-question')).toBeUndefined();
+  });
+});
+
+describe('modal submit handler registry', () => {
+  const event = { callbackId: 'ncu:form:x', values: {} } as never;
+  const adapter = { name: 'stub' } as never;
+
+  it('returns the first non-false result in order, skipping handlers that are not theirs', async () => {
+    const calls: string[] = [];
+    const errors = { action: 'errors', errors: { f: 'bad' } } as const;
+    const mine = (e: { callbackId: string }) => e.callbackId === 'ncu:form:x';
+    registerModalSubmitHandler(async (e) => {
+      if (!mine(e)) return false;
+      calls.push('not-mine');
+      return false;
+    });
+    registerModalSubmitHandler(async (e) => {
+      if (!mine(e)) return false;
+      calls.push('mine');
+      return errors;
+    });
+    registerModalSubmitHandler(async (e) => {
+      if (!mine(e)) return false;
+      calls.push('later');
+      return undefined;
+    });
+    expect(await dispatchModalSubmit(event, adapter, 'inst')).toEqual(errors);
+    expect(calls).toEqual(['not-mine', 'mine']);
+  });
+
+  it('logs and skips a throwing handler', async () => {
+    const spy = vi.spyOn(log, 'error').mockImplementation(() => {});
+    registerModalSubmitHandler(async (e) => {
+      if (e.callbackId !== 'ncu:form:throws') return false;
+      throw new Error('boom');
+    });
+    registerModalSubmitHandler(async (e) => (e.callbackId === 'ncu:form:throws' ? { action: 'clear' } : false));
+    const result = await dispatchModalSubmit({ callbackId: 'ncu:form:throws', values: {} } as never, adapter, 'inst');
+    expect(result).toEqual({ action: 'clear' });
+    expect(spy).toHaveBeenCalled();
+  });
+
+  it('returns undefined when every handler declines', async () => {
+    expect(
+      await dispatchModalSubmit({ callbackId: 'ncu:form:nobody', values: {} } as never, adapter, 'inst'),
+    ).toBeUndefined();
   });
 });

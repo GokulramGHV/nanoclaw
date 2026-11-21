@@ -2937,3 +2937,42 @@ it('shows the Discord decision near the embed limit with an older adapter config
   expect(message.fallbackText).toContain('Approved by Alice');
   expect(message.fallbackText).not.toContain('x'.repeat(3990));
 });
+
+it('routes a modal submit to a registered handler and returns its response', async () => {
+  const { initTestDb, closeDb } = await import('../db/connection.js');
+  const { runMigrations } = await import('../db/migrations/index.js');
+  await runMigrations(await initTestDb());
+  const { registerModalSubmitHandler } = await import('./question-render-registry.js');
+  const seen: string[] = [];
+  registerModalSubmitHandler(async (event, _adapter, instance) => {
+    if (event.callbackId !== 'ncu:form:x') return false;
+    seen.push(instance);
+    return { action: 'errors', errors: { f: 'bad' } };
+  });
+  const adapter = stubAdapter({
+    name: 'fixture',
+    initialize: async () => {},
+    channelIdFromThreadId: (threadId: string) => threadId,
+  });
+  const bridge = createChatSdkBridge({ adapter, instance: 'fixture-one', supportsThreads: false });
+  try {
+    await bridge.setup({ onInbound: () => {}, onInboundEvent: () => {}, onMetadata: () => {}, onAction: vi.fn() });
+    const chat = (bridge as unknown as { _chat: import('chat').Chat })._chat;
+    const result = await chat.processModalSubmit(
+      {
+        adapter,
+        callbackId: 'ncu:form:x',
+        raw: {},
+        user: { userId: 'u1' } as never,
+        values: {},
+        viewId: 'V1',
+      } as never,
+      undefined,
+    );
+    expect(result).toEqual({ action: 'errors', errors: { f: 'bad' } });
+    expect(seen).toEqual(['fixture-one']);
+  } finally {
+    await bridge.teardown();
+    await closeDb();
+  }
+});

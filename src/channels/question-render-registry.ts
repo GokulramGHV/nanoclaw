@@ -5,7 +5,7 @@
  * The host's existing DB lookup remains the final fallback for core question
  * and approval rows.
  */
-import type { Adapter, ActionEvent } from 'chat';
+import type { Adapter, ActionEvent, ModalResponse, ModalSubmitEvent } from 'chat';
 import { getAskQuestionRender } from '../db/sessions.js';
 import { log } from '../log.js';
 import type { NormalizedOption } from './ask-question.js';
@@ -60,4 +60,32 @@ export function registerQuestionActionHandler(handler: QuestionActionHandler): v
 export async function dispatchQuestionAction(event: ActionEvent, adapter: Adapter, instance: string): Promise<boolean> {
   for (const handler of actionHandlers) if (await handler(event, adapter, instance)) return true;
   return false;
+}
+
+/** `false` means the submit is not this handler's: the next handler is tried. */
+export type ModalSubmitHandler = (
+  event: ModalSubmitEvent,
+  adapter: Adapter,
+  instance: string,
+) => Promise<ModalResponse | undefined | false>;
+const modalSubmitHandlers: ModalSubmitHandler[] = [];
+export function registerModalSubmitHandler(handler: ModalSubmitHandler): void {
+  modalSubmitHandlers.push(handler);
+}
+export async function dispatchModalSubmit(
+  event: ModalSubmitEvent,
+  adapter: Adapter,
+  instance: string,
+): Promise<ModalResponse | undefined> {
+  for (const handler of [...modalSubmitHandlers]) {
+    /* eslint-disable no-catch-all/no-catch-all -- one optional handler must not block later handlers */
+    try {
+      const result = await handler(event, adapter, instance);
+      if (result !== false) return result;
+    } catch (err) {
+      log.error('Modal submit handler threw', { err });
+    }
+    /* eslint-enable no-catch-all/no-catch-all */
+  }
+  return undefined;
 }
