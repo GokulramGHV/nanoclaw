@@ -14,7 +14,7 @@ import { envValue } from '../../env.js';
 import { log } from '../../log.js';
 import { requestWake } from '../../request-wake.js';
 import { writeSessionMessage } from '../../session-manager.js';
-import { getCard, tryLock, updateState, type UiCard } from './db/ui-cards.js';
+import { getCard, tryLock, updateState, updateStateIfUnlocked, type UiCard } from './db/ui-cards.js';
 import { mergeState, parseActionId, renderCard, stateFromPayload, type CardState } from './render.js';
 import { canPress, createGroupCache, refusalText, ruleFor } from './rules.js';
 
@@ -185,10 +185,20 @@ export async function handleCardAction(event: ActionEvent, _adapter: Adapter, in
       return true;
     }
 
-    const merged = mergeState(card.state as CardState, stateFromPayload(ownPayload(raw, cardId)));
+    // A press may only change the stored value of controls this user may press.
+    const groupMembers = groupMembersFor(token);
+    const payloadState = stateFromPayload(ownPayload(raw, cardId));
+    const allowedState: CardState = {};
+    for (const [name, v] of Object.entries(payloadState)) {
+      if (await canPress(ruleFor(card.template, name), userId, card.ownerUserId, groupMembers)) allowedState[name] = v;
+    }
+    const merged = mergeState(card.state as CardState, allowedState);
 
     if (!rule.submit) {
-      await updateState(card.id, merged);
+      if (!(await updateStateIfUnlocked(card.id, merged))) {
+        await ephemeral(token, card.channelId, userId, threadTs, ALREADY_SUBMITTED);
+        return true;
+      }
       const actions = Array.isArray(raw.actions) ? raw.actions : [];
       const clicked = actions.find((a) => isObj(a) && a.action_id === event.actionId) ?? actions[0];
       const isButton = isObj(clicked) && clicked.type === 'button';
@@ -200,7 +210,11 @@ export async function handleCardAction(event: ActionEvent, _adapter: Adapter, in
       await ephemeral(token, card.channelId, userId, threadTs, ALREADY_SUBMITTED);
       return true;
     }
-    await updateState(card.id, merged);
+    try {
+      await updateState(card.id, merged);
+    } catch (err) {
+      log.error('slack-ui: saving state after lock failed', { card: card.id, err: errMsg(err) });
+    }
     const lockedCard: UiCard = {
       ...card,
       state: merged,

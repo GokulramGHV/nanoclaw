@@ -3,7 +3,16 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { closeDb, initTestDb, runMigrations } from '../../../db/index.js';
 import type { CardTemplate } from '../template.js';
 import './migrations.js';
-import { deleteCard, getCard, insertCard, setMessageTs, tryLock, updateState, type NewCard } from './ui-cards.js';
+import {
+  deleteCard,
+  getCard,
+  insertCard,
+  setMessageTs,
+  tryLock,
+  updateState,
+  updateStateIfUnlocked,
+  type NewCard,
+} from './ui-cards.js';
 
 const template: CardTemplate = {
   version: 1,
@@ -105,5 +114,16 @@ describe('ui_cards storage', () => {
     await insertCard(card());
     await deleteCard('card-1');
     expect(await getCard('card-1')).toBeUndefined();
+  });
+});
+
+describe('updateStateIfUnlocked', () => {
+  it('writes while unlocked and refuses once locked', async () => {
+    await insertCard(card());
+    expect(await updateStateIfUnlocked('card-1', { step: 2 })).toBe(true);
+    expect((await getCard('card-1'))!.state).toEqual({ step: 2 });
+    await tryLock('card-1', 'U1');
+    expect(await updateStateIfUnlocked('card-1', { step: 3 })).toBe(false);
+    expect((await getCard('card-1'))!.state).toEqual({ step: 2 });
   });
 });

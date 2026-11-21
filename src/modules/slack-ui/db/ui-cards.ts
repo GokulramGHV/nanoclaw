@@ -125,6 +125,17 @@ export async function updateState(id: string, state: Record<string, unknown>): P
   );
 }
 
+/** Write state only while the card is unlocked; true when a row changed. */
+export async function updateStateIfUnlocked(id: string, state: Record<string, unknown>): Promise<boolean> {
+  const res = await getDb().run(
+    'UPDATE ui_cards SET state_json = ?, updated_at = ? WHERE id = ? AND locked = 0',
+    JSON.stringify(state),
+    new Date().toISOString(),
+    id,
+  );
+  return res.changes === 1;
+}
+
 /** Atomically lock a card for `userId`; true only for the caller that won. */
 export async function tryLock(id: string, userId: string): Promise<boolean> {
   const now = new Date().toISOString();

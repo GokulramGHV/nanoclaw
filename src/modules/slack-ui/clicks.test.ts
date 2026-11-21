@@ -20,8 +20,13 @@ import { requestWake } from '../../request-wake.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import { handleCardAction } from './clicks.js';
 import './db/migrations.js';
-import { getCard, insertCard, updateState } from './db/ui-cards.js';
+import { getCard, insertCard, tryLock, updateState } from './db/ui-cards.js';
 import type { CardTemplate } from './template.js';
+
+vi.mock('./db/ui-cards.js', async (orig) => {
+  const actual = await orig<typeof import('./db/ui-cards.js')>();
+  return { ...actual, updateState: vi.fn(actual.updateState) };
+});
 
 const call = vi.mocked(slackCall);
 const write = vi.mocked(writeSessionMessage);
@@ -38,6 +43,9 @@ const template: CardTemplate = {
     create: { who: 'owner', submit: true },
     quiet: { who: 'owner', submit: true, notify: false },
     open: { who: 'anyone' },
+    notepick: { who: 'owner', notify: true },
+    gbtn: { who: { group: 'S-GRP' } },
+    glock: { who: { group: 'S-LOCK' } },
   },
   blocks: [
     {
@@ -309,6 +317,72 @@ describe('handleCardAction', () => {
     await newCard();
     await updateState('c1', { pick: ['a'] });
     await handleCardAction(ev('ncu:c1:open', { user: 'U9' }), adapter, 'slack');
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('fix round 1', () => {
+  const tick = (id: string, values: string[]) => ({
+    state: {
+      values: {
+        b1: { [id]: { type: 'checkboxes', selected_options: values.map((value) => ({ value })) } },
+      },
+    },
+  });
+
+  it('does not overwrite a card locked between load and write', async () => {
+    await newCard();
+    call.mockImplementation(async (_t, method) => {
+      if (method === 'usergroups.users.list') {
+        await tryLock('c1', 'U9');
+        return { ok: true, users: ['U2'] };
+      }
+      return { ok: true };
+    });
+    await handleCardAction(ev('ncu:c1:glock', { user: 'U2', raw: tick('ncu:c1:glock', ['x']) }), adapter, 'slack');
+    expect((await getCard('c1'))!.state).toEqual({ pick: ['a', 'b'] });
+    expect(write).not.toHaveBeenCalled();
+    const eph = call.mock.calls.filter((c) => c[1] === 'chat.postEphemeral');
+    expect(eph[0][2]).toMatchObject({ text: 'This was already submitted.' });
+  });
+
+  it('drops payload state for controls the presser may not press', async () => {
+    await newCard();
+    await handleCardAction(ev('ncu:c1:open', { user: 'U2', raw: tick('ncu:c1:pick', ['a']) }), adapter, 'slack');
+    expect((await getCard('c1'))!.state).toEqual({ pick: ['a', 'b'] });
+    expect(JSON.parse(write.mock.calls[0][2].content).payload.state).toEqual({ pick: ['a', 'b'] });
+  });
+
+  it('takes no lock for a refused submit press', async () => {
+    await newCard();
+    await handleCardAction(ev('ncu:c1:create', { user: 'U2' }), adapter, 'slack');
+    expect((await getCard('c1'))!.locked).toBe(false);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('applies a group rule through the group lookup', async () => {
+    await newCard();
+    call.mockImplementation(async (_t, method) =>
+      method === 'usergroups.users.list' ? { ok: true, users: ['U2'] } : { ok: true },
+    );
+    await handleCardAction(ev('ncu:c1:gbtn', { user: 'U3' }), adapter, 'slack');
+    expect(write).not.toHaveBeenCalled();
+    expect(call.mock.calls.some((c) => (c[2] as { text?: string }).text?.includes('<!subteam^S-GRP>'))).toBe(true);
+    await handleCardAction(ev('ncu:c1:gbtn', { user: 'U2' }), adapter, 'slack');
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  it('notifies for a checkbox with notify: true', async () => {
+    await newCard();
+    await handleCardAction(ev('ncu:c1:notepick', { raw: tick('ncu:c1:notepick', ['a']) }), adapter, 'slack');
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  it('still redraws and notifies when updateState throws after the lock', async () => {
+    await newCard();
+    vi.mocked(updateState).mockRejectedValueOnce(new Error('db down'));
+    await handleCardAction(ev('ncu:c1:create'), adapter, 'slack');
+    expect(methods()).toEqual(['chat.update']);
     expect(write).toHaveBeenCalledTimes(1);
   });
 });
