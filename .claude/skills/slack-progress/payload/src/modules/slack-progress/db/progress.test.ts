@@ -2,7 +2,16 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { closeDb, initTestDb, runMigrations } from '../../../db/index.js';
 import './migrations.js';
-import { closePlan, getPlan, getStream, listStale, upsertPlan, upsertStream, type PlanRow, type StreamRow } from './progress.js';
+import {
+  closePlan,
+  getPlan,
+  getStream,
+  listStale,
+  upsertPlan,
+  upsertStream,
+  type PlanRow,
+  type StreamRow,
+} from './progress.js';
 
 const plan = (over: Partial<PlanRow> = {}): PlanRow => ({
   turnId: 'turn-1',
@@ -56,7 +65,11 @@ describe('progress storage', () => {
     await upsertStream(stream({ streamTs: '1700000002.000300', status: 'stopped', sentText: 'hi' }));
     expect(await getPlan('turn-1')).toMatchObject({ messageTs: '1700000001.000200', closed: true });
     expect((await getPlan('turn-1'))!.createdAt).toBe('2026-01-01T00:00:00.000Z');
-    expect(await getStream('stream-1')).toMatchObject({ streamTs: '1700000002.000300', status: 'stopped', sentText: 'hi' });
+    expect(await getStream('stream-1')).toMatchObject({
+      streamTs: '1700000002.000300',
+      status: 'stopped',
+      sentText: 'hi',
+    });
   });
 
   it('closePlan', async () => {

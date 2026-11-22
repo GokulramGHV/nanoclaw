@@ -9,7 +9,8 @@ This skill adds progress in chat for Slack agents.
 
 - **Plan message.** The container tracks the agent's work and writes progress rows. The host turns them into one plan message per turn and edits it in place. The plan follows the agent's todo list. It appears after 5 seconds of work, or at once when the agent first writes a todo list.
 - **Streamed replies.** The agent's text is sent to Slack in batches about every half second, using Slack's streaming methods. The reply grows in the thread as it is written.
-- **No lost replies.** If any stream call fails, the host declines to stream and the normal delivery posts the full text.
+- **Closing summary.** When the turn ends, the plan message is redrawn as a short summary.
+- **No lost replies.** If the stream never started, or fails before any text is sent, the host declines and the normal delivery posts the full text. If a stream fails after text was already sent, the partial message stays in the thread and ends with "_Reply posted below._". The full reply then appears as a second message. The same happens when a reply contains a bare `@name` mention (the stream stops there and the whole reply is posted normally) and when the streamed text does not match the final reply.
 - **Quiet when idle.** A host sweep closes plans and streams that have been silent for 2 minutes once the session's container is gone.
 
 Streaming is used only when all of these hold:
@@ -32,7 +33,7 @@ The host stores plan and stream state in tables in the central database.
 - NanoClaw's container progress seam must be present in `container/agent-runner/src/progress-seam.ts`.
 - The Slack app needs the `chat:write` scope. Slack's reference pages for `chat.startStream`, `chat.appendStream` and `chat.stopStream` list `chat:write` as the only bot token scope for each.
 - The `chat.startStream` page names no special app feature, such as agent or assistant features, as a requirement. It describes the method as part of Slack's agent sessions. If streaming fails with an app or feature error in your workspace, check in Slack's docs and the app's settings.
-- When streaming into a channel, `chat.startStream` needs `recipient_user_id` and `recipient_team_id`. The host sends them. Only a reply inside a thread is streamed, because `thread_ts` is needed outside channels where the whole channel is one session.
+- When streaming into a channel, `chat.startStream` needs `recipient_user_id` and `recipient_team_id`. The host sends them. Only a reply inside a thread is streamed. Outside channels where the whole channel is one session, Slack needs `thread_ts`.
 - `chat.startStream` is rate limited to Tier 2.
 
 Check the code prerequisites. Each line must succeed; if one fails, stop and install what it names:
@@ -129,16 +130,18 @@ pnpm exec tsx .claude/skills/slack-progress/scripts/slack-progress.ts disable <a
 pnpm exec tsx .claude/skills/slack-progress/scripts/slack-progress.ts status <agent-group-id>
 ```
 
-The script writes the setting to the central database. Restart the group's containers after a change so a running session picks it up: `ncl groups restart --id <agent-group-id>`.
+The script writes the setting to the central database. The container checks the setting each turn, so no restart is needed.
 
 ## Troubleshooting
 
-**Nothing shows up.** Run `status` for the group. Progress is off until `enable` is run. Check that the host was restarted after the skill was applied and that the group's container was restarted after `enable`.
+**Nothing shows up.** Run `status` for the group. Progress is off until `enable` is run. Check that the host was restarted after the skill was applied.
 
 **`enable` fails with a missing table error.** The host has not run the migration yet. Start the host once with the skill applied, then run `enable` again.
 
 **The plan appears but replies are not streamed.** Streaming has stricter rules than the plan. Check that the reply is in a thread, that one human sender woke the agent, and that the channel is not in `SLACK_A2A_ROOMS`. Then check the host log for a Slack error from `chat.startStream`, `chat.appendStream` or `chat.stopStream`. On any such error the reply is posted normally, so nothing is lost.
 
 **Slack answers `missing_scope` or `not_allowed_token_type`.** The app needs `chat:write` as a bot token scope. Add it and reinstall the app to the workspace.
+
+**A reply shows twice.** The stream failed after some text was sent, the reply had a bare `@name` mention, or the streamed text did not match the final reply. The partial message ends with "_Reply posted below._" and the full reply is posted as a second message. This is expected and no text is lost.
 
 **A plan stays open.** The sweep closes plans and streams that are silent for 2 minutes after the container has gone. Wait for the next sweep, which runs every 30 seconds.

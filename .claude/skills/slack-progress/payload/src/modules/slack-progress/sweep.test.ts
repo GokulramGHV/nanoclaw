@@ -107,7 +107,9 @@ describe('sweepOnce', () => {
     await sweepOnce(NOW);
     expect(endWithNote).toHaveBeenCalledTimes(1);
     expect(vi.mocked(endWithNote).mock.calls[0][1]).toMatch(/reply interrupted/i);
-    expect(progressDb.upsertStream).toHaveBeenCalledWith(expect.objectContaining({ streamId: 'st1', status: 'stopped' }));
+    expect(progressDb.upsertStream).toHaveBeenCalledWith(
+      expect.objectContaining({ streamId: 'st1', status: 'stopped' }),
+    );
   });
 
   it('makes no Slack calls for a group where the feature is off', async () => {
