@@ -467,4 +467,26 @@ describe('readInboundSender row choice', () => {
     seedInbound([chatRow('before', 'UB', { seq: 2 }), chatRow('ctx', 'UY', { trigger: 0, seq: 4 })]);
     expect(readInboundSender(session, 'ctx')).toBeNull();
   });
+  // Seen live: after `post_card failed`, the agent re-posts in reply to that
+  // system notice. The owner is the person it was answering before the notice.
+  it('uses the last earlier person when the inReplyTo row is a system notice', () => {
+    seedInbound([
+      chatRow('ask', 'U1'),
+      chatRow('ctx', 'UB', { trigger: 0 }),
+      chatRow('sys-1', 'system'),
+      chatRow('sys-2', 'system'),
+    ]);
+    expect(readInboundSender(session, 'sys-1')).toBe('U1');
+    expect(readInboundSender(session, 'sys-2')).toBe('U1');
+  });
+
+  it('accepts an earlier card event presser when replying to a system notice', () => {
+    seedInbound([chatRow('ask', 'U1'), cardEvent('press', 'U2'), chatRow('sys-1', 'system')]);
+    expect(readInboundSender(session, 'sys-1')).toBe('U2');
+  });
+
+  it('stays null for a system notice with no earlier person', () => {
+    seedInbound([chatRow('ctx', 'UB', { trigger: 0 }), chatRow('sys-1', 'system')]);
+    expect(readInboundSender(session, 'sys-1')).toBeNull();
+  });
 });

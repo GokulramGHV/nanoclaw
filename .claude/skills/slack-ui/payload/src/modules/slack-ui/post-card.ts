@@ -63,6 +63,11 @@ function isOwnerRow(row: InboundRow): boolean {
   return row.kind === 'chat' || row.kind === 'chat-sdk' || isCardEvent(row, parseContent(row));
 }
 
+/** A chat row the host wrote as `system` (no person sent it). */
+function isSystemNotice(row: InboundRow): boolean {
+  return row.kind === 'chat' && parseContent(row)?.senderId === 'system';
+}
+
 /** The clicker for a slack-ui card_event row, else the chat sender. */
 function senderOf(row: InboundRow): string | null {
   const content = parseContent(row);
@@ -84,7 +89,10 @@ function senderOf(row: InboundRow): string | null {
  * (the container's in-reply-to, the first row of its batch). That row may be
  * a context row (trigger=0) from a bystander, or not a chat message at all.
  * Then the owner is the sender of the earliest later row that is a
- * triggering chat message or slack-ui card_event. There is no mailbox API to
+ * triggering chat message or slack-ui card_event. A host system notice (such
+ * as `post_card failed`) names no person; the agent replying to one is still
+ * answering whoever engaged it before, so the owner is the sender of the
+ * latest earlier owner row. There is no mailbox API to
  * read a message by id, so this opens the session's inbound.db read-only.
  * Never throws.
  */
@@ -100,8 +108,21 @@ export function readInboundSender(session: Session, messageId: unknown): string 
       .prepare('SELECT kind, content, seq, "trigger" AS trigger FROM messages_in WHERE id = ?')
       .get(messageId) as InboundRow | undefined;
     if (!row) return null;
-    if (isOwnerRow(row)) return senderOf(row);
+    if (isOwnerRow(row) && !isSystemNotice(row)) return senderOf(row);
     if (row.seq === null) return null;
+    if (isSystemNotice(row)) {
+      const earlier = db
+        .prepare(
+          `SELECT kind, content, seq, "trigger" AS trigger FROM messages_in
+           WHERE seq < ? AND "trigger" = 1 AND kind IN ('chat', 'chat-sdk', 'webhook')
+           ORDER BY seq DESC`,
+        )
+        .iterate(row.seq) as IterableIterator<InboundRow>;
+      for (const prev of earlier) {
+        if (isOwnerRow(prev) && !isSystemNotice(prev)) return senderOf(prev);
+      }
+      return null;
+    }
     const later = db
       .prepare(
         `SELECT kind, content, seq, "trigger" AS trigger FROM messages_in
