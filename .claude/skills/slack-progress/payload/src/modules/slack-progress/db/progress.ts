@@ -124,6 +124,15 @@ export async function upsertPlan(row: PlanRow): Promise<void> {
   );
 }
 
+/** Open plans of one session, oldest first. */
+export async function listOpenPlansForSession(sessionId: string): Promise<PlanRow[]> {
+  const rows = await getDb().all<PlanDbRow>(
+    'SELECT * FROM progress_plans WHERE session_id = ? AND closed = 0 ORDER BY created_at',
+    sessionId,
+  );
+  return rows.map(planFromRow);
+}
+
 export async function closePlan(turnId: string): Promise<void> {
   await getDb().run(
     'UPDATE progress_plans SET closed = 1, updated_at = ? WHERE turn_id = ?',

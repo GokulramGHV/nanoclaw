@@ -56,6 +56,15 @@ describe('renderPlan (working view)', () => {
     expect(contexts(blocks)).toEqual(['Up next: Third']);
   });
 
+  it('without pending support and no step started, shows one open card for the current activity', () => {
+    const todos = three.map((x) => ({ ...x, status: 'pending' as const }));
+    const withDoing = renderPlan(row({ todos, doing: 'Searching the web' }), { pendingOk: false }).blocks;
+    expect(cardsOf(withDoing).map((c) => [c.title, c.status])).toEqual([['Searching the web', 'in_progress']]);
+    expect(contexts(withDoing)).toEqual(['Up next: First · Second · Third']);
+    const bare = renderPlan(row({ todos, doing: null }), { pendingOk: false }).blocks;
+    expect(cardsOf(bare).map((c) => c.title)).toEqual(['Getting started']);
+  });
+
   it('the fallback text names the step in progress', () => {
     expect(renderPlan(row({ todos: three, doing: 'Reading files' })).text).toBe('Working: Second');
   });

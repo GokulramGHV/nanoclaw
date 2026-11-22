@@ -84,6 +84,7 @@ payload/src/modules/slack-progress/status.test.ts -> src/modules/slack-progress/
 payload/src/modules/slack-progress/status.ts -> src/modules/slack-progress/status.ts
 payload/src/modules/slack-progress/streams.test.ts -> src/modules/slack-progress/streams.test.ts
 payload/src/modules/slack-progress/streams.ts -> src/modules/slack-progress/streams.ts
+payload/src/modules/slack-progress/stop.ts -> src/modules/slack-progress/stop.ts
 payload/src/modules/slack-progress/sweep.test.ts -> src/modules/slack-progress/sweep.test.ts
 payload/src/modules/slack-progress/sweep.ts -> src/modules/slack-progress/sweep.ts
 payload/src/modules/slack-progress/wake.test.ts -> src/modules/slack-progress/wake.test.ts

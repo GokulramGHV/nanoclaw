@@ -106,6 +106,12 @@ export function renderPlan(
 ): { text: string; blocks: unknown[] } {
   const all = cards(row, 'working', Infinity);
   const listed = opts.pendingOk ? all : all.filter((c) => c.status !== 'pending');
+  // Nothing started yet: show one open card for what the agent is doing now, so the
+  // message is never just the grey "Up next" line.
+  if (listed.length === 0) {
+    const title = clip(row.doing ?? 'Getting started', TITLE_MAX) || 'Getting started';
+    listed.push({ type: 'task_card', task_id: 'now', title, status: 'in_progress' });
+  }
   const waiting = opts.pendingOk ? [] : all.filter((c) => c.status === 'pending').map((c) => c.title);
   const shown = listed.slice(0, MAX_WORKING_CARDS);
   const active = row.todos.find((t) => t.status === 'in_progress')?.title;

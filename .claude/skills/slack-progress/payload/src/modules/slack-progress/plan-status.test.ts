@@ -15,6 +15,9 @@ vi.mock('./db/progress.js', () => {
   return {
     __plans: plans,
     getPlan: vi.fn(async (id: string) => plans.get(id) ?? null),
+    listOpenPlansForSession: vi.fn(async (sid: string) =>
+      [...plans.values()].filter((p) => p.sessionId === sid && !p.closed).map((p) => ({ ...p })),
+    ),
     upsertPlan: vi.fn(async (p: any) => void plans.set(p.turnId, { ...p })),
     closePlan: vi.fn(async (id: string) => {
       const p = plans.get(id);

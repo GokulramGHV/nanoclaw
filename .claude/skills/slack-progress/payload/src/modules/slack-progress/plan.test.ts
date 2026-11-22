@@ -19,6 +19,9 @@ vi.mock('./db/progress.js', () => {
   return {
     __plans: plans,
     getPlan: vi.fn(async (id: string) => plans.get(id) ?? null),
+    listOpenPlansForSession: vi.fn(async (sid: string) =>
+      [...plans.values()].filter((p) => p.sessionId === sid && !p.closed).map((p) => ({ ...p })),
+    ),
     upsertPlan: vi.fn(async (p: any) => void plans.set(p.turnId, { ...p })),
     closePlan: vi.fn(async (id: string) => {
       const p = plans.get(id);
@@ -88,6 +91,22 @@ describe('progress action', () => {
     expect(method).toBe('chat.postMessage');
     expect(body).toMatchObject({ channel: 'C1', thread_ts: '100.1' });
     expect(plans.get('turn1').messageTs).toBe('200.1');
+  });
+
+  it('a new turn in the same session closes the older open plan as stopped, and its timer never redraws it', async () => {
+    await handleProgress(content(), session);
+    await handleProgress(content({ doing: 'B' }), session); // queues a timer draw for turn1
+    call.mockClear();
+    await handleProgress(content({ turnId: 'turn2' }), session);
+    const updates = call.mock.calls.filter((c) => c[1] === 'chat.update');
+    expect(updates).toHaveLength(1);
+    expect(updates[0][2]).toMatchObject({ channel: 'C1', ts: '200.1' });
+    expect(JSON.stringify(updates[0][2])).toContain('Stopped after');
+    expect(plans.get('turn1').closed).toBe(true);
+    expect(plans.get('turn2').closed).toBe(false);
+    call.mockClear();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(call.mock.calls.filter((c) => c[2]?.ts === '200.1' && c[1] === 'chat.update')).toHaveLength(0);
   });
 
   it('later rows chat.update at most once per 2000 ms with the latest state', async () => {

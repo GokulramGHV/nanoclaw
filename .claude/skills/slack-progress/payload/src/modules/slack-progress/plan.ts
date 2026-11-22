@@ -11,12 +11,13 @@ import { envValue } from '../../env.js';
 import { unguarded } from '../../guard/types.js';
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
-import { closePlan, getPlan, upsertPlan, type PlanRow } from './db/progress.js';
+import { closePlan, getPlan, listOpenPlansForSession, upsertPlan, type PlanRow } from './db/progress.js';
 import { a2aRooms } from './a2a-rooms.js';
 import { withRateLimitRetry } from './rate-limit.js';
 import { renderPlainSummary, renderPlan, renderSummary, type ProgressRow } from './render.js';
 import { isEnabled } from './settings.js';
 import { clearWorkingStatus, resetStatusState, setWorkingStatus } from './status.js';
+import { stopPlan } from './stop.js';
 
 export const EDIT_INTERVAL_MS = 2000;
 
@@ -172,6 +173,28 @@ async function finish(turnId: string, sessionId: string, ts: string, row: Progre
   live.delete(turnId);
 }
 
+/**
+ * A new turn in a session means any older open plan there will never finish (its
+ * container was restarted, or the turn was cut short). Close those as stopped now
+ * instead of waiting for the sweep. Never throws.
+ */
+async function stopOlderPlans(sessionId: string, turnId: string): Promise<void> {
+  try {
+    for (const old of await listOpenPlansForSession(sessionId)) {
+      if (old.turnId === turnId) continue;
+      const entry = live.get(old.turnId);
+      if (entry) {
+        if (entry.timer) clearTimeout(entry.timer);
+        entry.closed = true;
+        live.delete(old.turnId);
+      }
+      await stopPlan(old);
+    }
+  } catch (err) {
+    log.warn('slack-progress: could not stop older plans', { sessionId, err: String(err) });
+  }
+}
+
 async function process_(row: ProgressRow, content: Record<string, unknown>, session: Session): Promise<void> {
   if (!(await isEnabled(session.agent_group_id))) return;
   if (!session.messaging_group_id) return;
@@ -195,6 +218,8 @@ async function process_(row: ProgressRow, content: Record<string, unknown>, sess
     if (row.outcome === 'working') setWorkingStatus(session.id, row.turnId, { token, channel, threadTs }, label);
     else clearWorkingStatus(session.id, row.turnId);
   }
+
+  if (!plan) await stopOlderPlans(session.id, row.turnId);
 
   if (!plan || !plan.messageTs) {
     const now = new Date().toISOString();
