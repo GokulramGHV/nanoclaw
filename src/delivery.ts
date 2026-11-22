@@ -719,6 +719,21 @@ async function deliverMessage(
       : withPlatformMessageId(content, msg.content, session.agent_group_id);
   // A row id is unique only within its session's mailbox; the session id makes it unique host-wide.
   const deliveryId = `${session.id}:${msg.id}`;
+  if (msg.kind === 'chat') {
+    for (const intercept of chatDeliveryInterceptors) {
+      let handledId: string | null = null;
+      try {
+        handledId = await intercept(msg, session, content);
+      } catch (err) {
+        log.warn('Chat delivery interceptor failed — falling through', { id: msg.id, sessionId: session.id, err });
+      }
+      if (handledId) {
+        log.info('Message delivered by interceptor', { id: msg.id, sessionId: session.id, platformMsgId: handledId });
+        clearOutbox(session.agent_group_id, session.id, msg.id);
+        return handledId;
+      }
+    }
+  }
   const platformMsgId = await deliveryAdapter.deliver(
     msg.channelType,
     msg.platformId,
@@ -808,6 +823,26 @@ const deliveryActions = new Map<string, DeliveryEntry>();
 
 function isUnguardedEntry(entry: DeliveryEntry): entry is Extract<DeliveryEntry, { guard: Unguarded }> {
   return isUnguarded(entry.guard);
+}
+
+/**
+ * Chat delivery interceptors. A module can deliver a `chat` row itself, for
+ * example through a platform stream. Interceptors run in registration order
+ * just before the adapter. The first one to return a platform message id
+ * wins and the adapter is skipped. Returning null declines, and a throw is
+ * logged and treated as a decline, so the adapter still posts the reply.
+ */
+export type ChatDeliveryInterceptor = (
+  msg: OutboundMessage,
+  session: Session,
+  content: Record<string, unknown>,
+) => Promise<string | null>;
+const chatDeliveryInterceptors: ChatDeliveryInterceptor[] = [];
+export function registerChatDeliveryInterceptor(fn: ChatDeliveryInterceptor): void {
+  chatDeliveryInterceptors.push(fn);
+}
+export function _resetChatDeliveryInterceptorsForTesting(): void {
+  chatDeliveryInterceptors.length = 0;
 }
 
 /** See the batch-preview invocation in the delivery poll for semantics. */

@@ -10,6 +10,7 @@
  */
 import Database from 'better-sqlite3';
 import fs from 'fs';
+import path from 'path';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import type { Adapter, AdapterPostableMessage, RawMessage } from 'chat';
@@ -41,9 +42,11 @@ import {
 } from './db/index.js';
 import { getDeliveredIds } from './mailbox/sqlite/session-db.js';
 import { inboundDbPath, outboundDbPath } from './mailbox/sqlite/paths.js';
-import { resolveSession, resolveTaskSession, withMailboxSession } from './session-manager.js';
+import { resolveSession, sessionDir, resolveTaskSession, withMailboxSession } from './session-manager.js';
 import {
   deliverSessionMessages,
+  registerChatDeliveryInterceptor,
+  _resetChatDeliveryInterceptorsForTesting,
   registerDeliveryBatchPreview,
   registerPostDeliveryHook,
   setDeliveryAdapter,
@@ -897,5 +900,114 @@ describe('deliverSessionMessages — agent questions', () => {
     expect(delivered).toContainEqual({ text: 'hello' });
     // The body is stored too, so the answered card can keep it.
     expect((await getPendingQuestion('q-1'))?.question).toBe('Which?');
+  });
+});
+
+describe('deliverSessionMessages — chat delivery interceptors', () => {
+  afterEach(() => {
+    _resetChatDeliveryInterceptorsForTesting();
+  });
+
+  function insertRow(sessionId: string, msgId: string, kind: string): void {
+    const db = new Database(outboundDbPath('ag-1', sessionId));
+    db.prepare(
+      `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
+       VALUES (?, datetime('now'), ?, 'telegram:123', 'telegram', ?)`,
+    ).run(msgId, kind, JSON.stringify({ text: 'hi', files: ['a.txt'] }));
+    db.close();
+  }
+
+  function countingAdapter(): { calls: number } {
+    const state = { calls: 0 };
+    setDeliveryAdapter({
+      async deliver() {
+        state.calls++;
+        return 'adapter-id';
+      },
+    });
+    return state;
+  }
+
+  it('an interceptor returning an id skips adapter.deliver, clears the outbox and returns that id', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertRow(session.id, 'ic-1', 'chat');
+    const outboxMsgDir = path.join(sessionDir('ag-1', session.id), 'outbox', 'ic-1');
+    fs.mkdirSync(outboxMsgDir, { recursive: true });
+    fs.writeFileSync(path.join(outboxMsgDir, 'a.txt'), 'x');
+    const adapter = countingAdapter();
+    const seen: Array<Record<string, unknown>> = [];
+    registerChatDeliveryInterceptor(async (_msg, _s, content) => {
+      seen.push(content);
+      return 'stream-id';
+    });
+    registerChatDeliveryInterceptor(async () => 'second-id');
+
+    await deliverSessionMessages(session);
+
+    expect(adapter.calls).toBe(0);
+    expect(seen[0].text).toBe('hi');
+    const delivered = await withMailboxSession('ag-1', session.id, (mailbox) => mailbox.getDeliveredIds());
+    expect(delivered.has('ic-1')).toBe(true);
+    expect(fs.existsSync(outboxMsgDir)).toBe(false);
+  });
+
+  it('returning null falls through to adapter.deliver', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertRow(session.id, 'ic-2', 'chat');
+    const adapter = countingAdapter();
+    registerChatDeliveryInterceptor(async () => null);
+
+    await deliverSessionMessages(session);
+
+    expect(adapter.calls).toBe(1);
+  });
+
+  it('a throwing interceptor is logged and falls through', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertRow(session.id, 'ic-3', 'chat');
+    const adapter = countingAdapter();
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {});
+    registerChatDeliveryInterceptor(async () => {
+      throw new Error('boom');
+    });
+
+    try {
+      await deliverSessionMessages(session);
+      expect(adapter.calls).toBe(1);
+      expect(warnSpy).toHaveBeenCalledWith(
+        'Chat delivery interceptor failed — falling through',
+        expect.objectContaining({ id: 'ic-3' }),
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('no interceptor means unchanged delivery', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertRow(session.id, 'ic-4', 'chat');
+    const adapter = countingAdapter();
+
+    await deliverSessionMessages(session);
+
+    expect(adapter.calls).toBe(1);
+  });
+
+  it('interceptors are consulted only for kind chat rows', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    insertRow(session.id, 'ic-5', 'notification');
+    const adapter = countingAdapter();
+    const interceptor = vi.fn(async () => 'x');
+    registerChatDeliveryInterceptor(interceptor);
+
+    await deliverSessionMessages(session);
+
+    expect(interceptor).not.toHaveBeenCalled();
+    expect(adapter.calls).toBe(1);
   });
 });
