@@ -31,6 +31,7 @@ import {
   type RoutingContext,
 } from './formatter.js';
 import { stripHarnessTagArtifacts } from './harness-tag-strip.js';
+import { decorateChatRow, emitProgress } from './progress-seam.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 import type { ProviderRuntimeContract } from './provider-contracts/registry.js';
@@ -253,6 +254,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // a2a return-path routing. Re-published at every turn boundary inside
     // processQuery as later messages are answered.
     publishReplyRoute(routing);
+    emitProgress({ type: 'turn_start', routing: { ...routing }, messages: keep });
     // Forward a loop stop to the ACTIVE query. The stream deliberately stays
     // open between turns, so the loop can be parked inside processQuery when
     // config.signal fires; without this, the "stopped" loop's query — and its
@@ -430,6 +432,8 @@ export async function processQuery(
     unwrappedNudged: boolean;
     taskBlockNudged: boolean;
     nudgedWindow?: SeqWindow;
+    /** The follow-up batch behind this turn. Retries have none. */
+    messages?: MessageInRow[];
   };
   const queuedTurns: QueuedTurn[] = [];
   // On a wrap-nudge retry: the rows the nudged turn wrote. The turn boundary
@@ -443,6 +447,7 @@ export async function processQuery(
     nudgedWindow = next.nudgedWindow;
     publishReplyRoute(routing);
     answering = true;
+    if (next.messages) emitProgress({ type: 'turn_start', routing: { ...routing }, messages: next.messages });
   };
   // A retry is another provider input, behind any follow-ups already pushed.
   // Preserve its original route, prompt and retry guards until it is answered.
@@ -544,6 +549,7 @@ export async function processQuery(
           routing: extractRouting(keep),
           unwrappedNudged: false,
           taskBlockNudged: false,
+          messages: keep,
         };
         if (answering) queuedTurns.push(next);
         else adoptTurn(next);
@@ -785,6 +791,7 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
       break;
     case 'result':
       log(`Result: ${event.text ? event.text.slice(0, 200) : '(empty)'}`);
+      emitProgress({ type: 'turn_end', outcome: event.isError ? 'error' : 'done' });
       break;
     case 'error':
       log(
@@ -1355,14 +1362,15 @@ async function sendToDestination(dest: DestinationEntry, body: string, routing: 
   // contexts — stamping routing.threadId on every send would put one channel's
   // thread onto another.
   const destRouting = resolveDestinationThread(channelType, platformId, routing);
+  const threadId = destRouting?.threadId ?? null;
   await writeMessageOut({
     id: generateId(),
     in_reply_to: destRouting?.inReplyTo ?? routing.inReplyTo,
     kind: 'chat',
     platform_id: platformId,
     channel_type: channelType,
-    thread_id: destRouting?.threadId ?? null,
-    content: JSON.stringify({ text: body }),
+    thread_id: threadId,
+    content: JSON.stringify({ ...decorateChatRow({ platformId, channelType, threadId, body }), text: body }),
   });
 }
 

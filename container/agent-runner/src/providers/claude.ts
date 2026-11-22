@@ -19,10 +19,23 @@ import {
 // read the SDK's on-disk .jsonl, which no other provider has.
 import { archiveClaudeTranscript, rotateClaudeContinuation } from './claude-history.js';
 import { registerProvider } from './provider-registry.js';
+import { emitProgress, type ProgressTodo } from '../progress-seam.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 
 function log(msg: string): void {
   console.error(`[claude-provider] ${msg}`);
+}
+
+/** Tell the progress seam about each tool call, and the to-do list a TodoWrite carries. */
+function emitToolProgress(content: Array<{ type?: string; name?: string; input?: unknown }>): void {
+  for (const block of content) {
+    if (block.type !== 'tool_use' || !block.name) continue;
+    const input = (block.input && typeof block.input === 'object' ? block.input : {}) as Record<string, unknown>;
+    emitProgress({ type: 'tool', name: block.name, input });
+    if (block.name === 'TodoWrite' && Array.isArray(input.todos)) {
+      emitProgress({ type: 'todos', todos: input.todos as ProgressTodo[] });
+    }
+  }
 }
 
 export interface SdkRateLimitInfo {
@@ -323,6 +336,10 @@ export class ClaudeProvider implements AgentProvider {
         // is working. Deltas arrive per token and carry no content for us, so
         // they count at most once per second, and not as messages.
         if (message.type === 'stream_event') {
+          const ev = (message as { event?: { type?: string; delta?: { type?: string; text?: string } } }).event;
+          if (ev?.type === 'content_block_delta' && ev.delta?.type === 'text_delta' && ev.delta.text) {
+            emitProgress({ type: 'text_delta', text: ev.delta.text });
+          }
           const now = Date.now();
           if (now - lastStreamActivityAt < STREAM_ACTIVITY_INTERVAL_MS) continue;
           lastStreamActivityAt = now;
@@ -354,6 +371,7 @@ export class ClaudeProvider implements AgentProvider {
           const content = (message as { message?: { content?: Array<{ type?: string; text?: string }> } }).message
             ?.content;
           if (Array.isArray(content)) {
+            emitToolProgress(content);
             const text = content
               .filter((block) => block.type === 'text' && block.text)
               .map((block) => block.text)
