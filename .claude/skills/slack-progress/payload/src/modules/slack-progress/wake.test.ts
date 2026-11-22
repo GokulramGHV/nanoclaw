@@ -37,7 +37,7 @@ describe('progressDisplayContext', () => {
       {
         sender: 'system',
         time: '2026-01-01T00:00:00.000Z',
-        text: "People in this chat see your task list and your current step live, in a plan message and a status line. Do not report step progress in chat: no lines like 'Steps 1 and 2 are done', 'All four steps are done', or 'Now I will...'. Send a message mid-task only to ask a question or flag a real problem. Your final reply is the result itself, with no recap of which steps finished.",
+        text: "People in this chat see your task list and your current step live, in a plan message and a status line. Do not report step progress in chat: no lines like 'Steps 1 and 2 are done', 'All four steps are done', or 'Now I will...'. Do not send any message until the work is done, unless you must ask a question you cannot continue without or the work has failed. Do not explain retries, corrections or changes of approach: just make them. Your final reply is the result itself, with no recap of which steps finished and no account of how you got there.",
       },
     ]);
   });
