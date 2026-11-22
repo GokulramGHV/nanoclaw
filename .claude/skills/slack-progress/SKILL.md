@@ -62,12 +62,14 @@ payload/container/agent-runner/src/modules/slack-progress/streamer.test.ts -> co
 payload/container/agent-runner/src/modules/slack-progress/streamer.ts -> container/agent-runner/src/modules/slack-progress/streamer.ts
 payload/container/agent-runner/src/modules/slack-progress/tracker.test.ts -> container/agent-runner/src/modules/slack-progress/tracker.test.ts
 payload/container/agent-runner/src/modules/slack-progress/tracker.ts -> container/agent-runner/src/modules/slack-progress/tracker.ts
+payload/src/modules/slack-progress/a2a-rooms.ts -> src/modules/slack-progress/a2a-rooms.ts
 payload/src/modules/slack-progress/db/migrations.ts -> src/modules/slack-progress/db/migrations.ts
 payload/src/modules/slack-progress/db/progress.test.ts -> src/modules/slack-progress/db/progress.test.ts
 payload/src/modules/slack-progress/db/progress.ts -> src/modules/slack-progress/db/progress.ts
 payload/src/modules/slack-progress/index.ts -> src/modules/slack-progress/index.ts
 payload/src/modules/slack-progress/plan.test.ts -> src/modules/slack-progress/plan.test.ts
 payload/src/modules/slack-progress/plan.ts -> src/modules/slack-progress/plan.ts
+payload/src/modules/slack-progress/rate-limit.ts -> src/modules/slack-progress/rate-limit.ts
 payload/src/modules/slack-progress/registration.test.ts -> src/modules/slack-progress/registration.test.ts
 payload/src/modules/slack-progress/render.test.ts -> src/modules/slack-progress/render.test.ts
 payload/src/modules/slack-progress/render.ts -> src/modules/slack-progress/render.ts
