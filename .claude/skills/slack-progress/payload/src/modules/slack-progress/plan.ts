@@ -14,7 +14,7 @@ import type { Session } from '../../types.js';
 import { closePlan, getPlan, upsertPlan, type PlanRow } from './db/progress.js';
 import { a2aRooms } from './a2a-rooms.js';
 import { withRateLimitRetry } from './rate-limit.js';
-import { renderPlan, renderSummary, type ProgressRow } from './render.js';
+import { renderPlainSummary, renderPlan, renderSummary, type ProgressRow } from './render.js';
 import { isEnabled } from './settings.js';
 import { clearWorkingStatus, resetStatusState, setWorkingStatus } from './status.js';
 
@@ -31,7 +31,7 @@ interface Live {
 
 const live = new Map<string, Live>();
 const chains = new Map<string, Promise<void>>();
-/** Slack answers invalid_blocks to the undocumented 'pending' status: remember it for this process. */
+/** Slack may answer invalid_blocks to a pending card in the summary: remember it for this process. */
 let pendingOk = true;
 
 /** Test hook: forget all in-memory state. */
@@ -87,7 +87,7 @@ function isInvalidBlocks(err: unknown): boolean {
   return err instanceof Error && err.name === 'SlackApiError' && err.message.includes('invalid_blocks');
 }
 
-/** Send one post or update; on invalid_blocks for a pending card, retry once without pending. */
+/** Send one post or update; on invalid_blocks for a pending summary card, retry once without pending. */
 async function send(
   method: 'chat.postMessage' | 'chat.update',
   token: string,
@@ -95,13 +95,18 @@ async function send(
   row: ProgressRow,
 ): Promise<Record<string, unknown>> {
   const build = () => {
-    const r = row.outcome === 'working' ? renderPlan(row, { pendingOk }) : renderSummary(row, { pendingOk });
+    const r = row.outcome === 'working' ? renderPlan(row) : renderSummary(row, { pendingOk });
     return { ...base, text: r.text, blocks: r.blocks };
   };
   try {
     return await withRateLimitRetry(() => slackCall(token, method, build(), 'progress'));
   } catch (err) {
-    if (pendingOk && isInvalidBlocks(err) && row.todos.some((t) => t.status === 'pending')) {
+    if (
+      pendingOk &&
+      row.outcome !== 'working' &&
+      isInvalidBlocks(err) &&
+      row.todos.some((t) => t.status === 'pending')
+    ) {
       pendingOk = false;
       return await withRateLimitRetry(() => slackCall(token, method, build(), 'progress'));
     }
@@ -150,6 +155,20 @@ async function finish(turnId: string, sessionId: string, ts: string, row: Progre
     await send('chat.update', entry.token, { channel: entry.channel, ts }, row);
   } catch (err) {
     log.warn('slack-progress: summary update failed', { turnId, err: String(err) });
+    // Slack refused the switch from task cards to a plan. Close with plain text instead.
+    try {
+      const plain = renderPlainSummary(row);
+      await withRateLimitRetry(() =>
+        slackCall(
+          entry.token,
+          'chat.update',
+          { channel: entry.channel, ts, text: plain.text, blocks: plain.blocks },
+          'progress',
+        ),
+      );
+    } catch (err2) {
+      log.warn('slack-progress: plain summary update failed', { turnId, err: String(err2) });
+    }
   }
   await closePlan(turnId).catch((err) => {
     log.warn('slack-progress: could not close plan', { turnId, err: String(err) });

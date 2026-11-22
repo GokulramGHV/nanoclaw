@@ -144,24 +144,51 @@ describe('progress action', () => {
     expect(log.warn).toHaveBeenCalledWith('slack-progress: could not close plan', expect.anything());
   });
 
-  it('invalid_blocks on a pending card retries with pendingOk false and remembers it', async () => {
+  it('working updates are task cards, the final update is a plan block', async () => {
+    await handleProgress(content(), session);
+    expect(JSON.stringify(call.mock.calls[0][2])).toContain('"task_card"');
+    expect(JSON.stringify(call.mock.calls[0][2])).not.toContain('"type":"plan"');
+    call.mockClear();
+    await handleProgress(content({ outcome: 'done' }), session);
+    expect(JSON.stringify(call.mock.calls[0][2])).toContain('"type":"plan"');
+  });
+
+  it('invalid_blocks on a pending summary card retries with pendingOk false and remembers it', async () => {
     const pending = {
+      outcome: 'done',
       todos: [
         { title: 'Later', status: 'pending' },
         { title: 'Now', status: 'in_progress' },
       ],
     };
-    const err = Object.assign(new Error('slack chat.postMessage failed: invalid_blocks'), { name: 'SlackApiError' });
+    await handleProgress(content(), session);
+    call.mockClear();
+    const err = Object.assign(new Error('slack chat.update failed: invalid_blocks'), { name: 'SlackApiError' });
     call.mockRejectedValueOnce(err).mockResolvedValue({ ok: true, ts: '200.1' });
     await handleProgress(content(pending), session);
     expect(call).toHaveBeenCalledTimes(2);
-    expect(JSON.stringify(call.mock.calls[0][2])).toContain('"pending"');
+    expect(JSON.stringify(call.mock.calls[0][2])).toContain('"status":"pending"');
     expect(JSON.stringify(call.mock.calls[1][2])).not.toContain('"status":"pending"');
     // Remembered: a later turn goes straight to the fallback shape.
+    await handleProgress(content({ turnId: 'turn2' }), session);
     call.mockClear();
     await handleProgress(content({ ...pending, turnId: 'turn2' }), session);
     expect(call).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(call.mock.calls[0][2])).not.toContain('"status":"pending"');
+  });
+
+  it('a refused final update falls back to a plain text summary and still closes', async () => {
+    await handleProgress(content(), session);
+    call.mockClear();
+    const err = Object.assign(new Error('slack chat.update failed: invalid_blocks'), { name: 'SlackApiError' });
+    call.mockRejectedValueOnce(err).mockResolvedValue({ ok: true, ts: '200.1' });
+    await handleProgress(content({ outcome: 'done', elapsedMs: 42000 }), session);
+    expect(call).toHaveBeenCalledTimes(2);
+    const body = call.mock.calls[1][2] as { text: string; blocks: { type: string }[] };
+    expect(call.mock.calls[1][1]).toBe('chat.update');
+    expect(body.text).toContain('Done in 42s');
+    expect(body.blocks.map((b) => b.type)).toEqual(['section']);
+    expect(plans.get('turn1').closed).toBe(true);
   });
 
   it('disabled group: no Slack call', async () => {

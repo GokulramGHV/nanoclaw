@@ -10,7 +10,7 @@ import { getSession } from '../../db/sessions.js';
 import { envValue } from '../../env.js';
 import { log } from '../../log.js';
 import { closePlan, listStale, upsertStream, type PlanRow, type StreamRow } from './db/progress.js';
-import { renderSummary, type ProgressRow } from './render.js';
+import { renderPlainSummary, renderSummary, type ProgressRow } from './render.js';
 import { isEnabled } from './settings.js';
 import { clearWorkingStatus } from './status.js';
 import { endWithNote } from './streams.js';
@@ -39,8 +39,13 @@ async function redrawPlan(plan: PlanRow): Promise<void> {
   try {
     await draw(true);
   } catch {
-    // A pending card may have been refused; retry once without it.
-    await draw(false);
+    // A pending card may have been refused; retry once without it, then fall back to plain text.
+    try {
+      await draw(false);
+    } catch {
+      const r = renderPlainSummary(row);
+      await slackCall(token, 'chat.update', { ...base, text: r.text, blocks: r.blocks }, 'progress');
+    }
   }
 }
 
