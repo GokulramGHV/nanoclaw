@@ -48,6 +48,8 @@ payload/src/modules/slack-ui/clicks.ts -> src/modules/slack-ui/clicks.ts
 payload/src/modules/slack-ui/clicks.test.ts -> src/modules/slack-ui/clicks.test.ts
 payload/src/modules/slack-ui/post-card.ts -> src/modules/slack-ui/post-card.ts
 payload/src/modules/slack-ui/post-card.test.ts -> src/modules/slack-ui/post-card.test.ts
+payload/src/modules/slack-ui/notify.ts -> src/modules/slack-ui/notify.ts
+payload/src/modules/slack-ui/notify.test.ts -> src/modules/slack-ui/notify.test.ts
 payload/src/modules/slack-ui/registration.test.ts -> src/modules/slack-ui/registration.test.ts
 payload/src/modules/slack-ui/db/migrations.ts -> src/modules/slack-ui/db/migrations.ts
 payload/src/modules/slack-ui/db/ui-cards.ts -> src/modules/slack-ui/db/ui-cards.ts

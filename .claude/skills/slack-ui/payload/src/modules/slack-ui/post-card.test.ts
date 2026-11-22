@@ -10,7 +10,7 @@ vi.mock('../../channels/slack-lib.js', () => ({
   botTokenKeyForInstance: (i: string) => (i === 'slack' ? 'SLACK_BOT_TOKEN' : 'SLACK_BOT_TOKEN_X'),
 }));
 vi.mock('../../env.js', async (orig) => ({ ...(await orig<typeof import('../../env.js')>()), envValue: vi.fn() }));
-vi.mock('../approvals/primitive.js', () => ({ notifyAgent: vi.fn() }));
+vi.mock('./notify.js', () => ({ notifyCardFailure: vi.fn() }));
 vi.mock('../../db/agent-groups.js', () => ({ getAgentGroup: vi.fn() }));
 vi.mock('../../db/messaging-groups.js', () => ({ getMessagingGroup: vi.fn() }));
 vi.mock('../../group-folder.js', () => ({ resolveGroupFolderPath: vi.fn() }));
@@ -30,9 +30,9 @@ import { log } from '../../log.js';
 import { INBOUND_SCHEMA } from '../../mailbox/sqlite/schema.js';
 import { sessionDir } from '../../session-manager.js';
 import type { Session } from '../../types.js';
-import { notifyAgent } from '../approvals/primitive.js';
 import { getCard, insertCard, setMessageTs } from './db/ui-cards.js';
 import './index.js';
+import { notifyCardFailure } from './notify.js';
 import { parseTemplate } from './template.js';
 import { handlePostCard, readInboundSender } from './post-card.js';
 
@@ -42,7 +42,7 @@ vi.mock('./db/ui-cards.js', async (orig) => {
 });
 
 const call = vi.mocked(slackCall);
-const notify = vi.mocked(notifyAgent);
+const notify = vi.mocked(notifyCardFailure);
 
 const templateJson = JSON.stringify({
   version: 1,
@@ -232,7 +232,7 @@ describe('post_card', () => {
       call.mockClear();
       await post({}, { ...session, id: 'sess-2' });
       expect(call).not.toHaveBeenCalled();
-      expect(notify).toHaveBeenCalledWith(expect.anything(), 'post_card failed: card id already in use');
+      expect(notify.mock.calls[0]![1]).toBe('post_card failed: card id already in use');
     });
 
     it('reposts when an earlier attempt left a row without a message ts', async () => {
@@ -370,10 +370,7 @@ describe('post_card', () => {
     call.mockRejectedValue(new SlackApiError('post_card', 'slack chat.postMessage failed: channel_not_found'));
     await post();
     expect(await getCard('card-1')).toBeUndefined();
-    expect(notify).toHaveBeenCalledWith(
-      expect.anything(),
-      'post_card failed: slack chat.postMessage failed: channel_not_found',
-    );
+    expect(notify.mock.calls[0]![1]).toBe('post_card failed: slack chat.postMessage failed: channel_not_found');
   });
 
   it('keeps the row and does not notify when saving the ts fails once', async () => {
@@ -403,7 +400,16 @@ describe('post_card', () => {
     expect(notify.mock.calls[0][1]).toBe('post_card failed: unexpected error (see host log)');
   });
 
-  it('does not throw when notifyAgent itself fails', async () => {
+  it('passes the message the card answered to the failure notice', async () => {
+    call.mockRejectedValue(new Error('boom'));
+    await post({ inReplyTo: 'msg-9' });
+    expect(notify.mock.calls[0]![2]).toBe('msg-9');
+    notify.mockClear();
+    await post({ cardId: 'card-2', inReplyTo: 42 });
+    expect(notify.mock.calls[0]![2]).toBeUndefined();
+  });
+
+  it('does not throw when the failure notice itself fails', async () => {
     notify.mockRejectedValue(new Error('boom'));
     await expect(post({ template: 'nope' })).resolves.toBeUndefined();
   });
@@ -488,5 +494,31 @@ describe('readInboundSender row choice', () => {
   it('stays null for a system notice with no earlier person', () => {
     seedInbound([chatRow('ctx', 'UB', { trigger: 0 }), chatRow('sys-1', 'system')]);
     expect(readInboundSender(session, 'sys-1')).toBeNull();
+  });
+
+  const failNotice = (id: string, cardInReplyTo: string): SeedRow => ({
+    id,
+    kind: 'chat',
+    content: JSON.stringify({ text: 'post_card failed: x', sender: 'system', senderId: 'system', cardInReplyTo }),
+  });
+
+  it('follows a failure notice to the message the failed card answered, not the latest person', () => {
+    seedInbound([chatRow('ask', 'UA'), chatRow('other', 'UB'), failNotice('sys-1', 'ask')]);
+    expect(readInboundSender(session, 'sys-1')).toBe('UA');
+  });
+
+  it('follows a chain of failure notices', () => {
+    seedInbound([
+      chatRow('ask', 'UA'),
+      chatRow('other', 'UB'),
+      failNotice('sys-1', 'ask'),
+      failNotice('sys-2', 'sys-1'),
+    ]);
+    expect(readInboundSender(session, 'sys-2')).toBe('UA');
+  });
+
+  it('stops on a notice loop instead of recursing forever', () => {
+    seedInbound([chatRow('ask', 'UA'), failNotice('sys-1', 'sys-2'), failNotice('sys-2', 'sys-1')]);
+    expect(readInboundSender(session, 'sys-1')).toBe('UA');
   });
 });

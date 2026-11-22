@@ -19,8 +19,8 @@ import { resolveGroupFolderPath } from '../../group-folder.js';
 import { log } from '../../log.js';
 import { sessionDir } from '../../session-manager.js';
 import type { Session } from '../../types.js';
-import { notifyAgent } from '../approvals/primitive.js';
 import { deleteCard, getCard, insertCard, setMessageTs } from './db/ui-cards.js';
+import { notifyCardFailure } from './notify.js';
 import { renderCard } from './render.js';
 import { fillTemplate, findTemplate, TemplateError, validateData } from './template.js';
 
@@ -89,10 +89,12 @@ function senderOf(row: InboundRow): string | null {
  * (the container's in-reply-to, the first row of its batch). That row may be
  * a context row (trigger=0) from a bystander, or not a chat message at all.
  * Then the owner is the sender of the earliest later row that is a
- * triggering chat message or slack-ui card_event. A host system notice (such
- * as `post_card failed`) names no person; the agent replying to one is still
- * answering whoever engaged it before, so the owner is the sender of the
- * latest earlier owner row. There is no mailbox API to
+ * triggering chat message or slack-ui card_event. A host system notice names
+ * no person. A `post_card failed` notice records the message the failed card
+ * answered (`cardInReplyTo`), and the lookup follows it. For any other notice
+ * the owner is the sender of the latest earlier owner row; in a busy thread
+ * that can be someone who engaged the agent after the real requester. There
+ * is no mailbox API to
  * read a message by id, so this opens the session's inbound.db read-only.
  * Never throws.
  */
@@ -104,42 +106,57 @@ export function readInboundSender(session: Session, messageId: unknown): string 
       readonly: true,
       fileMustExist: true,
     });
-    const row = db
-      .prepare('SELECT kind, content, seq, "trigger" AS trigger FROM messages_in WHERE id = ?')
-      .get(messageId) as InboundRow | undefined;
-    if (!row) return null;
-    if (isOwnerRow(row) && !isSystemNotice(row)) return senderOf(row);
-    if (row.seq === null) return null;
-    if (isSystemNotice(row)) {
-      const earlier = db
-        .prepare(
-          `SELECT kind, content, seq, "trigger" AS trigger FROM messages_in
-           WHERE seq < ? AND "trigger" = 1 AND kind IN ('chat', 'chat-sdk', 'webhook')
-           ORDER BY seq DESC`,
-        )
-        .iterate(row.seq) as IterableIterator<InboundRow>;
-      for (const prev of earlier) {
-        if (isOwnerRow(prev) && !isSystemNotice(prev)) return senderOf(prev);
-      }
-      return null;
-    }
-    const later = db
-      .prepare(
-        `SELECT kind, content, seq, "trigger" AS trigger FROM messages_in
-         WHERE seq > ? AND "trigger" = 1 AND kind IN ('chat', 'chat-sdk', 'webhook')
-         ORDER BY seq`,
-      )
-      .iterate(row.seq) as IterableIterator<InboundRow>;
-    for (const next of later) {
-      if (isOwnerRow(next)) return senderOf(next);
-    }
-    return null;
+    return senderFor(db, messageId, 0);
   } catch (err) {
     log.debug('slack-ui: could not read inbound sender', { err: err instanceof Error ? err.message : String(err) });
     return null;
   } finally {
     db?.close();
   }
+}
+
+/** Follows at most this many `cardInReplyTo` links (a re-post that fails again adds one). */
+const MAX_NOTICE_HOPS = 5;
+
+function senderFor(db: Database.Database, messageId: string, hops: number): string | null {
+  const row = db
+    .prepare('SELECT kind, content, seq, "trigger" AS trigger FROM messages_in WHERE id = ?')
+    .get(messageId) as InboundRow | undefined;
+  if (!row) return null;
+  const notice = isSystemNotice(row);
+  if (!notice && isOwnerRow(row)) return senderOf(row);
+  if (notice) {
+    const answered = parseContent(row)?.cardInReplyTo;
+    if (typeof answered === 'string' && answered !== messageId && hops < MAX_NOTICE_HOPS) {
+      const followed = senderFor(db, answered, hops + 1);
+      if (followed) return followed;
+    }
+  }
+  if (row.seq === null) return null;
+  if (notice) {
+    const earlier = db
+      .prepare(
+        `SELECT kind, content, seq, "trigger" AS trigger FROM messages_in
+         WHERE seq < ? AND "trigger" = 1 AND kind IN ('chat', 'chat-sdk', 'webhook')
+         ORDER BY seq DESC`,
+      )
+      .iterate(row.seq) as IterableIterator<InboundRow>;
+    for (const prev of earlier) {
+      if (isOwnerRow(prev) && !isSystemNotice(prev)) return senderOf(prev);
+    }
+    return null;
+  }
+  const later = db
+    .prepare(
+      `SELECT kind, content, seq, "trigger" AS trigger FROM messages_in
+       WHERE seq > ? AND "trigger" = 1 AND kind IN ('chat', 'chat-sdk', 'webhook')
+       ORDER BY seq`,
+    )
+    .iterate(row.seq) as IterableIterator<InboundRow>;
+  for (const next of later) {
+    if (isOwnerRow(next)) return senderOf(next);
+  }
+  return null;
 }
 
 async function postCard(content: Record<string, unknown>, session: Session): Promise<void> {
@@ -242,7 +259,9 @@ export async function handlePostCard(content: Record<string, unknown>, session: 
         : 'unexpected error (see host log)';
     log.warn('slack-ui: post_card failed', { err: err instanceof Error ? err.message : String(err) });
     try {
-      await notifyAgent(session, `post_card failed: ${reason}`);
+      const answered =
+        typeof content.inReplyTo === 'string' && content.inReplyTo !== '' ? content.inReplyTo : undefined;
+      await notifyCardFailure(session, `post_card failed: ${reason}`, answered);
     } catch (notifyErr) {
       log.error('slack-ui: could not notify agent', { err: String(notifyErr) });
     }
