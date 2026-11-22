@@ -7,7 +7,16 @@ vi.mock('../typing/index.js', () => ({ pauseTypingRefreshAfterDelivery: vi.fn() 
 import { slackCall } from '../../channels/slack-lib.js';
 import { log } from '../../log.js';
 import { pauseTypingRefreshAfterDelivery } from '../typing/index.js';
-import { clearWorkingStatus, resetStatusState, setWorkingStatus, statusText, STATUS_REFRESH_MS } from './status.js';
+import {
+  clearWorkingStatus,
+  loadingLines,
+  pickPlayful,
+  PLAYFUL_LINES,
+  resetStatusState,
+  setWorkingStatus,
+  statusText,
+  STATUS_REFRESH_MS,
+} from './status.js';
 
 const call = vi.mocked(slackCall);
 const pause = vi.mocked(pauseTypingRefreshAfterDelivery);
@@ -36,11 +45,28 @@ describe('working status', () => {
         channel_id: 'C1',
         thread_ts: '100.1',
         status: 'is working: Reading files',
-        loading_messages: ['is working: Reading files'],
+        loading_messages: expect.arrayContaining(['is working: Reading files']),
       },
       'status',
     );
     expect(pause).toHaveBeenCalledWith('s1');
+  });
+
+  it('rotates the real step first, then playful lines', () => {
+    expect(loadingLines('is working: Count lines', true, ['a', 'b', 'c', 'd'])).toEqual([
+      'is working: Count lines',
+      'a',
+      'b',
+      'c',
+    ]);
+    expect(loadingLines('is working', false, ['a', 'b', 'c', 'd', 'e', 'f'])).toEqual(['a', 'b', 'c', 'd', 'e']);
+  });
+
+  it('picks distinct playful lines from the list', () => {
+    const picks = pickPlayful(5, () => 0);
+    expect(new Set(picks).size).toBe(5);
+    for (const p of picks) expect(PLAYFUL_LINES).toContain(p);
+    expect(PLAYFUL_LINES.every((l) => l.length <= 50 && !l.includes('\u2014'))).toBe(true);
   });
 
   it('uses a bare "is working" when doing is empty and trims long text', () => {
