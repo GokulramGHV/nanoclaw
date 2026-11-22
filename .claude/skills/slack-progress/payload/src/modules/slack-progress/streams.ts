@@ -15,9 +15,16 @@ import { log } from '../../log.js';
 import type { OutboundMessage } from '../../mailbox/index.js';
 import type { Session } from '../../types.js';
 import { getStream, upsertStream, type StreamRow } from './db/progress.js';
+import { a2aRooms } from './a2a-rooms.js';
+import { withRateLimitRetry } from './rate-limit.js';
 import { isEnabled } from './settings.js';
 
 const NOTE_BELOW = '_Reply posted below._';
+
+/** One Slack call, retried when Slack answers ratelimited. */
+function call(token: string, method: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  return withRateLimitRetry(() => slackCall(token, method, body, 'stream'));
+}
 
 const chains = new Map<string, Promise<unknown>>();
 const teamCache = new Map<string, string>();
@@ -70,16 +77,6 @@ function threadTsFor(threadId: unknown, channel: string): string | null {
   return parts[2];
 }
 
-function a2aRooms(): Set<string> {
-  const raw = envValue('SLACK_A2A_ROOMS') ?? '';
-  return new Set(
-    raw
-      .split(',')
-      .map((s) => stripSlack(s.trim()))
-      .filter(Boolean),
-  );
-}
-
 async function teamIdFor(token: string): Promise<string> {
   const cached = teamCache.get(token);
   if (cached) return cached;
@@ -117,7 +114,7 @@ async function appendWork(content: Record<string, unknown>, session: Session): P
   if (platformChannel !== chat.channel) return;
 
   let row = await getStream(streamId);
-  if (row && row.status !== 'open') return;
+  if (row && (row.sessionId !== session.id || row.status !== 'open')) return;
   const now = new Date().toISOString();
   if (!row) {
     const threadTs = threadTsFor(content.threadId, chat.channel);
@@ -142,18 +139,13 @@ async function appendWork(content: Record<string, unknown>, session: Session): P
     await upsertStream(row);
     try {
       const team = await teamIdFor(token);
-      const res = await slackCall(
-        token,
-        'chat.startStream',
-        {
-          channel: chat.channel,
-          thread_ts: threadTs,
-          recipient_user_id: recipient,
-          recipient_team_id: team,
-          markdown_text: text,
-        },
-        'stream',
-      );
+      const res = await call(token, 'chat.startStream', {
+        channel: chat.channel,
+        thread_ts: threadTs,
+        recipient_user_id: recipient,
+        recipient_team_id: team,
+        markdown_text: text,
+      });
       if (typeof res.ts !== 'string') throw new Error('Slack did not return a stream timestamp');
       await save(row, { streamTs: res.ts, sentText: text });
     } catch (err) {
@@ -169,12 +161,7 @@ async function appendWork(content: Record<string, unknown>, session: Session): P
     return;
   }
   try {
-    await slackCall(
-      token,
-      'chat.appendStream',
-      { channel: row.channelId, ts: row.streamTs, markdown_text: text },
-      'stream',
-    );
+    await call(token, 'chat.appendStream', { channel: row.channelId, ts: row.streamTs, markdown_text: text });
     await save(row, { sentText: row.sentText + text });
   } catch (err) {
     log.warn('slack-progress: stream append failed', { streamId, err: String(err) });
@@ -196,12 +183,7 @@ export async function endWithNote(row: StreamRow, note: string): Promise<void> {
   const token = envValue(botTokenKeyForInstance(row.instance));
   if (!token || !row.streamTs) return;
   try {
-    await slackCall(
-      token,
-      'chat.stopStream',
-      { channel: row.channelId, ts: row.streamTs, markdown_text: note },
-      'stream',
-    );
+    await call(token, 'chat.stopStream', { channel: row.channelId, ts: row.streamTs, markdown_text: note });
   } catch (err) {
     log.warn('slack-progress: could not end stream with note', { streamId: row.streamId, err: String(err) });
   }
@@ -218,9 +200,9 @@ async function abortWork(content: Record<string, unknown>, session: Session): Pr
     return;
   }
   try {
-    await slackCall(token, 'chat.stopStream', { channel: row.channelId, ts: row.streamTs }, 'stream');
+    await call(token, 'chat.stopStream', { channel: row.channelId, ts: row.streamTs });
     await save(row, { status: 'stopped' });
-    await slackCall(token, 'chat.delete', { channel: row.channelId, ts: row.streamTs }, 'stream');
+    await call(token, 'chat.delete', { channel: row.channelId, ts: row.streamTs });
   } catch (err) {
     log.warn('slack-progress: stream abort failed', { streamId: id, err: String(err) });
     await save(row, { status: 'failed' });
@@ -268,14 +250,9 @@ async function interceptWork(
   const rest = tail.trim() === '' ? '' : tail;
   try {
     if (rest !== '') {
-      await slackCall(
-        token,
-        'chat.appendStream',
-        { channel: row.channelId, ts: row.streamTs, markdown_text: rest },
-        'stream',
-      );
+      await call(token, 'chat.appendStream', { channel: row.channelId, ts: row.streamTs, markdown_text: rest });
     }
-    await slackCall(token, 'chat.stopStream', { channel: row.channelId, ts: row.streamTs }, 'stream');
+    await call(token, 'chat.stopStream', { channel: row.channelId, ts: row.streamTs });
   } catch (err) {
     log.warn('slack-progress: could not finish stream', { streamId, err: String(err) });
     await save(row, { status: 'failed' });

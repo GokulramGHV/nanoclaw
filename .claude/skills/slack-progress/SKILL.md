@@ -10,7 +10,7 @@ This skill adds progress in chat for Slack agents.
 - **Plan message.** The container tracks the agent's work and writes progress rows. The host turns them into one plan message per turn and edits it in place. The plan follows the agent's todo list. It appears after 5 seconds of work, or at once when the agent first writes a todo list.
 - **Streamed replies.** The agent's text is sent to Slack in batches about every half second, using Slack's streaming methods. The reply grows in the thread as it is written.
 - **Closing summary.** When the turn ends, the plan message is redrawn as a short summary.
-- **No lost replies.** If the stream never started, or fails before any text is sent, the host declines and the normal delivery posts the full text. If a stream fails after text was already sent, the partial message stays in the thread and ends with "_Reply posted below._". The full reply then appears as a second message. The same happens when a reply contains a bare `@name` mention (the stream stops there and the whole reply is posted normally) and when the streamed text does not match the final reply.
+- **No lost replies.** If the stream never started, or fails before any text is sent, the host declines and the normal delivery posts the full text. If a stream fails after text was already sent, the partial message stays in the thread and ends with "_Reply posted below._". The full reply then appears as a second message. The same happens when a reply contains a bare `@name` mention (the reply streams to the end, then it gets the note and the whole reply is posted normally) and when the streamed text does not match the final reply.
 - **Quiet when idle.** A host sweep closes plans and streams that have been silent for 2 minutes once the session's container is gone.
 
 Streaming is used only when all of these hold:
@@ -33,8 +33,9 @@ The host stores plan and stream state in tables in the central database.
 - NanoClaw's container progress seam must be present in `container/agent-runner/src/progress-seam.ts`.
 - The Slack app needs the `chat:write` scope. Slack's reference pages for `chat.startStream`, `chat.appendStream` and `chat.stopStream` list `chat:write` as the only bot token scope for each.
 - The `chat.startStream` page names no special app feature, such as agent or assistant features, as a requirement. It describes the method as part of Slack's agent sessions. If streaming fails with an app or feature error in your workspace, check in Slack's docs and the app's settings.
-- When streaming into a channel, `chat.startStream` needs `recipient_user_id` and `recipient_team_id`. The host sends them. Only a reply inside a thread is streamed. Outside channels where the whole channel is one session, Slack needs `thread_ts`.
-- `chat.startStream` is rate limited to Tier 2.
+- When streaming into a channel, `chat.startStream` needs `recipient_user_id` and `recipient_team_id`. The host sends them. Slack always needs `thread_ts` to start a stream, so only a reply inside a thread is streamed.
+- `chat.startStream` is rate limited to Tier 2. When Slack answers `ratelimited`, the host waits a few seconds and retries the call in order, so no text is lost.
+- Plans are not posted in channels listed in `SLACK_A2A_ROOMS`, or for a message from another chat in a shared session.
 
 Check the code prerequisites. Each line must succeed; if one fails, stop and install what it names:
 

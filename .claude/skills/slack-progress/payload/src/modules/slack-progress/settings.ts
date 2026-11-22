@@ -1,9 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { GROUPS_DIR } from '../../config.js';
 import { getDb } from '../../db/connection.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
+import { resolveGroupFolderPath } from '../../group-folder.js';
 
 /** The container reads this file at /workspace/agent/.slack-progress-enabled. */
 export const MARKER_FILE = '.slack-progress-enabled';
@@ -28,7 +28,7 @@ export async function setEnabled(agentGroupId: string, on: boolean): Promise<voi
     on ? 1 : 0,
     new Date().toISOString(),
   );
-  const marker = path.join(GROUPS_DIR, group.folder, MARKER_FILE);
+  const marker = path.join(resolveGroupFolderPath(group.folder), MARKER_FILE);
   if (on) {
     fs.mkdirSync(path.dirname(marker), { recursive: true });
     fs.writeFileSync(marker, 'enabled\n');

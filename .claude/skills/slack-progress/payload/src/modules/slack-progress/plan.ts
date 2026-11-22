@@ -12,6 +12,8 @@ import { unguarded } from '../../guard/types.js';
 import { log } from '../../log.js';
 import type { Session } from '../../types.js';
 import { closePlan, getPlan, upsertPlan, type PlanRow } from './db/progress.js';
+import { a2aRooms } from './a2a-rooms.js';
+import { withRateLimitRetry } from './rate-limit.js';
 import { renderPlan, renderSummary, type ProgressRow } from './render.js';
 import { isEnabled } from './settings.js';
 
@@ -59,9 +61,10 @@ export function parseProgressRow(content: Record<string, unknown>): ProgressRow 
   if (!Array.isArray(todos)) return null;
   const clean: ProgressRow['todos'] = [];
   for (const t of todos) {
+    // One bad entry is skipped so it cannot freeze the whole plan.
     const o = t as { title?: unknown; status?: unknown };
-    if (typeof o?.title !== 'string') return null;
-    if (o.status !== 'pending' && o.status !== 'in_progress' && o.status !== 'completed') return null;
+    if (typeof o?.title !== 'string') continue;
+    if (o.status !== 'pending' && o.status !== 'in_progress' && o.status !== 'completed') continue;
     clean.push({ title: o.title, status: o.status });
   }
   const elapsed = Number(content.elapsedMs);
@@ -94,11 +97,11 @@ async function send(
     return { ...base, text: r.text, blocks: r.blocks };
   };
   try {
-    return await slackCall(token, method, build(), 'progress');
+    return await withRateLimitRetry(() => slackCall(token, method, build(), 'progress'));
   } catch (err) {
     if (pendingOk && isInvalidBlocks(err) && row.todos.some((t) => t.status === 'pending')) {
       pendingOk = false;
-      return await slackCall(token, method, build(), 'progress');
+      return await withRateLimitRetry(() => slackCall(token, method, build(), 'progress'));
     }
     throw err;
   }
@@ -157,6 +160,9 @@ async function process_(row: ProgressRow, content: Record<string, unknown>, sess
   const mg = await getMessagingGroup(session.messaging_group_id);
   if (!mg || mg.channel_type !== 'slack') return;
   const channel = stripSlack(mg.platform_id);
+  // Only the session's own chat gets a plan, and never an a2a room.
+  if (stripSlack(row.platformId).split(':')[0] !== channel) return;
+  if (a2aRooms().has(channel)) return;
   const instance = mg.instance ?? mg.channel_type;
   const token = envValue(botTokenKeyForInstance(instance));
   if (!token) return;

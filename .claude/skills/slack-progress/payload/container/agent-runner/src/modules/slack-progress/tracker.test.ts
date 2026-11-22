@@ -183,4 +183,19 @@ describe('progress tracker', () => {
     tracker.onEvent({ type: 'turn_end', outcome: 'done' });
     expect(rows).toHaveLength(0);
   });
+
+  test('malformed todos are coerced so the row stays valid', () => {
+    const { tracker, rows } = setup();
+    tracker.onEvent(start());
+    tracker.onEvent({
+      type: 'todos',
+      todos: [{ status: 'in_progress' }, { content: 'ok', status: 'weird' }, null] as never,
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].todos).toEqual([
+      { title: '', status: 'in_progress' },
+      { title: 'ok', status: 'pending' },
+      { title: '', status: 'pending' },
+    ]);
+  });
 });

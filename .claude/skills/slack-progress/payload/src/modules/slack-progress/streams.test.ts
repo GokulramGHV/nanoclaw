@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../channels/slack-lib.js', () => ({
   slackCall: vi.fn(),
@@ -23,6 +23,7 @@ import { registerChatDeliveryInterceptor, registerDeliveryAction } from '../../d
 import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { envValue } from '../../env.js';
 import * as progressDb from './db/progress.js';
+import { rateLimit } from './rate-limit.js';
 import { isEnabled } from './settings.js';
 import { handleStreamAbort, handleStreamAppend, interceptStreamedReply, resetStreamState } from './streams.js';
 
@@ -178,6 +179,68 @@ describe('stream_append', () => {
     await handleStreamAppend(append({ text: 'hi @alex and <@U2>' }), session);
     const start = call.mock.calls.find((c) => c[1] === 'chat.startStream')!;
     expect((start[2] as any).markdown_text).toBe('hi @alex and <@U2>');
+  });
+});
+
+describe('stream_append ownership', () => {
+  it('an append for a stream owned by another session is ignored', async () => {
+    seedStream({ sessionId: 'other' });
+    await handleStreamAppend(append(), session);
+    expect(call).not.toHaveBeenCalled();
+    expect(streams.get('st1').sentText).toBe('Hello');
+  });
+});
+
+describe('rate limits', () => {
+  const limited = (m: string) => Object.assign(new Error(`slack ${m} failed: ratelimited`), { name: 'SlackApiError' });
+  const saved = [...rateLimit.delaysMs];
+  beforeEach(() => {
+    rateLimit.delaysMs = [0, 0];
+  });
+  afterEach(() => {
+    rateLimit.delaysMs = [...saved];
+  });
+
+  it('a rate-limited append is retried and the stream does not fail', async () => {
+    seedStream();
+    let first = true;
+    call.mockImplementation(async (_t, method) => {
+      if (method === 'chat.appendStream' && first) {
+        first = false;
+        throw limited(method);
+      }
+      return { ok: true };
+    });
+    await handleStreamAppend(append({ text: ' more' }), session);
+    expect(methods()).toEqual(['chat.appendStream', 'chat.appendStream']);
+    expect(streams.get('st1').status).toBe('open');
+    expect(streams.get('st1').sentText).toBe('Hello more');
+  });
+
+  it('a rate-limited final append and stop are retried, then the reply is handed back as streamed', async () => {
+    seedStream();
+    const seen = new Set<string>();
+    call.mockImplementation(async (_t, method) => {
+      if (!seen.has(method)) {
+        seen.add(method);
+        throw limited(method);
+      }
+      return { ok: true };
+    });
+    const ts = await interceptStreamedReply(msg(), session, { stream: 'st1', text: 'Hello world' });
+    expect(ts).toBe('300.1');
+    expect(methods()).toEqual(['chat.appendStream', 'chat.appendStream', 'chat.stopStream', 'chat.stopStream']);
+    expect(streams.get('st1').status).toBe('stopped');
+  });
+
+  it('gives up after the bounded retries and the stream is marked failed', async () => {
+    seedStream();
+    call.mockImplementation(async (_t, method) => {
+      throw limited(method);
+    });
+    await handleStreamAppend(append({ text: ' more' }), session);
+    expect(call).toHaveBeenCalledTimes(3);
+    expect(streams.get('st1').status).toBe('failed');
   });
 });
 

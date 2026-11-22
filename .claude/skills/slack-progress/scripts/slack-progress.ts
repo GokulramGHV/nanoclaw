@@ -6,8 +6,8 @@
  *
  * Opens the central DB the same way scripts/q.ts does, so it works with the
  * installed composition. The host creates the progress tables at startup, so
- * run the host once after installing the module first. Restart the group's container after a change so a
- * running session picks up the marker file.
+ * run the host once after installing the module first. No restart is needed: the marker file lives in the
+ * group folder, which the container sees, and it is read each turn.
  */
 import { CENTRAL_DB_PATH } from '../../../../src/config.js';
 import { closeDb, initDb } from '../../../../src/db/connection.js';

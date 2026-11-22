@@ -28,7 +28,8 @@ import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { envValue } from '../../env.js';
 import { log } from '../../log.js';
 import * as progressDb from './db/progress.js';
-import { handleProgress, resetPlanState } from './plan.js';
+import { handleProgress, parseProgressRow, resetPlanState } from './plan.js';
+import { rateLimit } from './rate-limit.js';
 import { isEnabled } from './settings.js';
 
 const plans = (progressDb as unknown as { __plans: Map<string, any> }).__plans;
@@ -184,5 +185,43 @@ describe('progress action', () => {
     await handleProgress({ action: 'progress' }, session);
     expect(call).not.toHaveBeenCalled();
     expect(log.warn).toHaveBeenCalled();
+  });
+
+  it('a row for another chat posts nothing', async () => {
+    await handleProgress(content({ platformId: 'slack:C2', threadId: 'slack:C2:5.5' }), session);
+    expect(call).not.toHaveBeenCalled();
+    expect(plans.size).toBe(0);
+  });
+
+  it('a channel listed in SLACK_A2A_ROOMS gets no plan', async () => {
+    vi.mocked(envValue).mockImplementation((k: string) => (k === 'SLACK_A2A_ROOMS' ? 'C9, slack:C1' : 'xoxb-test'));
+    await handleProgress(content(), session);
+    expect(call).not.toHaveBeenCalled();
+    expect(plans.size).toBe(0);
+  });
+
+  it('one malformed todo is skipped and the rest of the row is kept', () => {
+    const row = parseProgressRow(
+      content({
+        todos: [{ status: 'pending' }, null, { title: 'Odd', status: 'weird' }, { title: 'Ok', status: 'pending' }],
+      }),
+    );
+    expect(row?.todos).toEqual([{ title: 'Ok', status: 'pending' }]);
+  });
+
+  describe('rate limits', () => {
+    const limited = () => Object.assign(new Error('slack chat.update failed: ratelimited'), { name: 'SlackApiError' });
+
+    it('a rate-limited summary update is retried and the plan is closed once it succeeds', async () => {
+      await handleProgress(content(), session);
+      call.mockClear();
+      call.mockRejectedValueOnce(limited()).mockResolvedValue({ ok: true });
+      const done = handleProgress(content({ outcome: 'done' }), session);
+      await vi.advanceTimersByTimeAsync(rateLimit.delaysMs[0]);
+      await done;
+      expect(call.mock.calls.map((c) => c[1])).toEqual(['chat.update', 'chat.update']);
+      expect(plans.get('turn1').closed).toBe(true);
+      expect(log.warn).not.toHaveBeenCalled();
+    });
   });
 });

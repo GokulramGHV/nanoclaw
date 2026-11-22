@@ -127,7 +127,10 @@ export function createProgressTracker(deps: TrackerDeps): { onEvent(e: ProgressE
       }
       case 'todos': {
         if (!turn) return;
-        const next = e.todos.map((x) => ({ title: x.content, status: x.status }));
+        const next = (Array.isArray(e.todos) ? e.todos : []).map((x) => ({
+          title: typeof x?.content === 'string' ? x.content : '',
+          status: x?.status === 'in_progress' || x?.status === 'completed' ? x.status : ('pending' as const),
+        }));
         if (JSON.stringify(next) !== JSON.stringify(turn.todos)) {
           turn.todos = next;
           turn.dirty = true;
