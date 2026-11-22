@@ -9,6 +9,7 @@ vi.mock('../../container-runner.js', () => ({ isContainerRunning: vi.fn() }));
 vi.mock('../../db/sessions.js', () => ({ getSession: vi.fn() }));
 vi.mock('../../log.js', () => ({ log: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
 vi.mock('./settings.js', () => ({ isEnabled: vi.fn() }));
+vi.mock('./status.js', () => ({ clearWorkingStatus: vi.fn() }));
 vi.mock('./streams.js', () => ({ endWithNote: vi.fn(async () => undefined) }));
 vi.mock('./db/progress.js', () => ({
   listStale: vi.fn(),
@@ -23,6 +24,7 @@ import { envValue } from '../../env.js';
 import { log } from '../../log.js';
 import * as progressDb from './db/progress.js';
 import { isEnabled } from './settings.js';
+import { clearWorkingStatus } from './status.js';
 import { endWithNote } from './streams.js';
 import { STALE_MS, sweepOnce } from './sweep.js';
 
@@ -90,6 +92,7 @@ describe('sweepOnce', () => {
     expect(body.text).toMatch(/^Stopped after \d+s/);
     expect(JSON.stringify(body.blocks)).toContain('"status":"error"');
     expect(progressDb.closePlan).toHaveBeenCalledWith('t1');
+    expect(clearWorkingStatus).toHaveBeenCalledWith('s1', 't1');
   });
 
   it('plan silent but container running is left alone', async () => {
@@ -97,6 +100,7 @@ describe('sweepOnce', () => {
     stale([planRow()], [streamRow()]);
     await sweepOnce(NOW);
     expect(slackCall).not.toHaveBeenCalled();
+    expect(clearWorkingStatus).not.toHaveBeenCalled();
     expect(endWithNote).not.toHaveBeenCalled();
     expect(progressDb.closePlan).not.toHaveBeenCalled();
     expect(progressDb.upsertStream).not.toHaveBeenCalled();

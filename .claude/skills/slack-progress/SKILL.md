@@ -9,6 +9,7 @@ This skill adds progress in chat for Slack agents.
 
 - **Plan message.** The container tracks the agent's work and writes progress rows. The host turns them into one plan message per turn and edits it in place. The plan follows the agent's task list (TodoWrite, or TaskCreate and TaskUpdate). A turn's plan shows the steps created or updated in that turn. It appears at once when the agent first writes a task list, or after 5 seconds of work once the agent has made a tool call. A plain answer with no tools and no task list gets no plan.
 - **Streamed replies.** The agent's text is sent to Slack in batches about every half second, using Slack's streaming methods. The reply grows in the thread as it is written.
+- **Status line.** While a turn's plan is open, the line under the thread (where Slack shows "Typing...") reads "is working: <what the agent is doing>". The host refreshes it every 8 seconds and pauses the generic typing refresher so it is not overwritten. It is cleared when the turn ends or the plan is closed. It is shown only in the session's own chat, in a thread, and never in `SLACK_A2A_ROOMS` channels.
 - **Closing summary.** When the turn ends, the plan message is redrawn as a short summary.
 - **No lost replies.** If the stream never started, or fails before any text is sent, the host declines and the normal delivery posts the full text. If a stream fails after text was already sent, the partial message stays in the thread and ends with "_Reply posted below._". The full reply then appears as a second message. The same happens when a reply contains a bare `@name` mention (the reply streams to the end, then it gets the note and the whole reply is posted normally) and when the streamed text does not match the final reply.
 - **Quiet when idle.** A host sweep closes plans and streams that have been silent for 2 minutes once the session's container is gone.
@@ -75,6 +76,9 @@ payload/src/modules/slack-progress/render.test.ts -> src/modules/slack-progress/
 payload/src/modules/slack-progress/render.ts -> src/modules/slack-progress/render.ts
 payload/src/modules/slack-progress/settings.test.ts -> src/modules/slack-progress/settings.test.ts
 payload/src/modules/slack-progress/settings.ts -> src/modules/slack-progress/settings.ts
+payload/src/modules/slack-progress/plan-status.test.ts -> src/modules/slack-progress/plan-status.test.ts
+payload/src/modules/slack-progress/status.test.ts -> src/modules/slack-progress/status.test.ts
+payload/src/modules/slack-progress/status.ts -> src/modules/slack-progress/status.ts
 payload/src/modules/slack-progress/streams.test.ts -> src/modules/slack-progress/streams.test.ts
 payload/src/modules/slack-progress/streams.ts -> src/modules/slack-progress/streams.ts
 payload/src/modules/slack-progress/sweep.test.ts -> src/modules/slack-progress/sweep.test.ts

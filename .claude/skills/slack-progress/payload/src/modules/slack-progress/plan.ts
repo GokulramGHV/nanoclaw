@@ -16,6 +16,7 @@ import { a2aRooms } from './a2a-rooms.js';
 import { withRateLimitRetry } from './rate-limit.js';
 import { renderPlan, renderSummary, type ProgressRow } from './render.js';
 import { isEnabled } from './settings.js';
+import { clearWorkingStatus, resetStatusState, setWorkingStatus } from './status.js';
 
 export const EDIT_INTERVAL_MS = 2000;
 
@@ -39,6 +40,7 @@ export function resetPlanState(): void {
   live.clear();
   chains.clear();
   pendingOk = true;
+  resetStatusState();
 }
 
 /** `slack:<channel>:<ts>` -> ts, only when the channel matches. */
@@ -136,13 +138,14 @@ async function draw(turnId: string, ts: string): Promise<void> {
   }
 }
 
-async function finish(turnId: string, ts: string, row: ProgressRow): Promise<void> {
+async function finish(turnId: string, sessionId: string, ts: string, row: ProgressRow): Promise<void> {
   const entry = live.get(turnId);
   if (!entry) return;
   if (entry.timer) clearTimeout(entry.timer);
   entry.timer = null;
   entry.closed = true;
   entry.latest = row;
+  clearWorkingStatus(sessionId, turnId);
   try {
     await send('chat.update', entry.token, { channel: entry.channel, ts }, row);
   } catch (err) {
@@ -170,6 +173,11 @@ async function process_(row: ProgressRow, content: Record<string, unknown>, sess
 
   const plan = await getPlan(row.turnId);
   if (plan?.closed) return;
+  // The status line follows the plan's own gates. It needs a thread, and it never delays the plan.
+  if (threadTs) {
+    if (row.outcome === 'working') setWorkingStatus(session.id, row.turnId, { token, channel, threadTs }, row.doing);
+    else clearWorkingStatus(session.id, row.turnId);
+  }
 
   if (!plan || !plan.messageTs) {
     const now = new Date().toISOString();
@@ -220,7 +228,7 @@ async function process_(row: ProgressRow, content: Record<string, unknown>, sess
   }
   entry.latest = row;
   if (row.outcome !== 'working') {
-    await finish(row.turnId, ts, row);
+    await finish(row.turnId, session.id, ts, row);
     return;
   }
   if (entry.timer) return; // the pending draw will use the latest state

@@ -12,6 +12,7 @@ import { log } from '../../log.js';
 import { closePlan, listStale, upsertStream, type PlanRow, type StreamRow } from './db/progress.js';
 import { renderSummary, type ProgressRow } from './render.js';
 import { isEnabled } from './settings.js';
+import { clearWorkingStatus } from './status.js';
 import { endWithNote } from './streams.js';
 
 export const STALE_MS = 120000;
@@ -50,6 +51,7 @@ async function sweepPlan(plan: PlanRow): Promise<void> {
   } catch (err) {
     log.warn('slack-progress: could not redraw stale plan', { turnId: plan.turnId, err: String(err) });
   }
+  clearWorkingStatus(plan.sessionId, plan.turnId);
   // Close whatever happened above, so the sweep never retries a plan forever.
   await closePlan(plan.turnId);
 }
