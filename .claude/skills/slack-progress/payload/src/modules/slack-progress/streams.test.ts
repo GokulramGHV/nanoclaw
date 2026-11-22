@@ -174,9 +174,7 @@ describe('stream_append', () => {
     expect(call).not.toHaveBeenCalled();
   });
 
-  it('mentions in streamed text get the same treatment as the bridge gives Slack text', async () => {
-    // The Slack bridge applies no text transform of its own (the adapter resolves
-    // mentions inside postMessage), so streamed text is sent unchanged.
+  it('pieces are sent unchanged, even with mentions', async () => {
     await handleStreamAppend(append({ text: 'hi @alex and <@U2>' }), session);
     const start = call.mock.calls.find((c) => c[1] === 'chat.startStream')!;
     expect((start[2] as any).markdown_text).toBe('hi @alex and <@U2>');
@@ -278,6 +276,37 @@ describe('interceptor', () => {
     const id = await interceptStreamedReply(msg(), session, { text: 'Hello there', stream: 'st1' });
     await pending;
     expect(id).toBe('300.1');
+    expect(methods()).toEqual(['chat.appendStream', 'chat.stopStream']);
+  });
+});
+
+describe('interceptor whitespace and mentions', () => {
+  it('leading newline in streamed text still matches the trimmed final text', async () => {
+    seedStream({ sentText: '\nHello' });
+    expect(await interceptStreamedReply(msg(), session, { text: 'Hello world', stream: 'st1' })).toBe('300.1');
+    expect(call.mock.calls.map((c) => [c[1], (c[2] as any).markdown_text])).toEqual([
+      ['chat.appendStream', ' world'],
+      ['chat.stopStream', undefined],
+    ]);
+  });
+
+  it('trailing newline in streamed text: final differs only by trailing whitespace, no note, no duplicate', async () => {
+    seedStream({ sentText: '\nHello\n' });
+    expect(await interceptStreamedReply(msg(), session, { text: 'Hello', stream: 'st1' })).toBe('300.1');
+    expect(methods()).toEqual(['chat.stopStream']);
+    expect((call.mock.calls[0][2] as any).markdown_text).toBeUndefined();
+  });
+
+  it('bare @name in the final text declines with the note', async () => {
+    seedStream();
+    expect(await interceptStreamedReply(msg(), session, { text: 'Hello @alex', stream: 'st1' })).toBeNull();
+    expect(methods()).toEqual(['chat.stopStream']);
+    expect((call.mock.calls[0][2] as any).markdown_text).toMatch(/reply posted below/i);
+  });
+
+  it('tokenised <@U123> mention streams normally', async () => {
+    seedStream();
+    expect(await interceptStreamedReply(msg(), session, { text: 'Hello <@U123>', stream: 'st1' })).toBe('300.1');
     expect(methods()).toEqual(['chat.appendStream', 'chat.stopStream']);
   });
 });

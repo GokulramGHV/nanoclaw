@@ -42,6 +42,22 @@ function enqueue<T>(streamId: string, fn: () => Promise<T>, fallback: T): Promis
   return run;
 }
 
+/**
+ * True when the text has a bare @name the Slack adapter would turn into a mention.
+ * This copies the adapter's rule: skip code and <...> tokens, and skip raw user ids.
+ * Streamed pieces go out unchanged, so such a reply is posted normally instead.
+ */
+export function hasBareMention(text: string): boolean {
+  const masked = text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`[^`\n]*`/g, ' ')
+    .replace(/<[^>\n]*>/g, ' ');
+  for (const m of masked.matchAll(/(?<![\w<])@(\w[\w-]*)/g)) {
+    if (!/^[UW][A-Z0-9]+$/.test(m[1])) return true;
+  }
+  return false;
+}
+
 function stripSlack(id: string): string {
   return id.startsWith('slack:') ? id.slice('slack:'.length) : id;
 }
@@ -235,12 +251,21 @@ async function interceptWork(
     await save(row, { status: 'failed' });
     return null;
   }
-  if (!finalText.startsWith(row.sentText)) {
+  if (hasBareMention(finalText)) {
     await save(row, { status: 'failed' });
     await endWithNote(row, NOTE_BELOW);
     return null;
   }
-  const rest = finalText.slice(row.sentText.length);
+  // The streamed text keeps the newlines after <message> and before </message>, but the
+  // final chat text is trimmed. Ignore leading and trailing whitespace of the streamed part.
+  const shown = row.sentText.trim();
+  if (!finalText.startsWith(shown)) {
+    await save(row, { status: 'failed' });
+    await endWithNote(row, NOTE_BELOW);
+    return null;
+  }
+  const tail = finalText.slice(shown.length);
+  const rest = tail.trim() === '' ? '' : tail;
   try {
     if (rest !== '') {
       await slackCall(
