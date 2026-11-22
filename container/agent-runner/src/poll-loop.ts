@@ -31,7 +31,7 @@ import {
   type RoutingContext,
 } from './formatter.js';
 import { stripHarnessTagArtifacts } from './harness-tag-strip.js';
-import { decorateChatRow, emitProgress } from './progress-seam.js';
+import { chatRowDecoratorKeys, decorateChatRow, emitProgress } from './progress-seam.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 import type { ProviderRuntimeContract } from './provider-contracts/registry.js';
@@ -1154,10 +1154,21 @@ function wasWrittenInSeqWindow(dest: DestinationEntry, body: string, afterSeq: n
   const content = JSON.stringify({ text: body });
   // A lookup error reads as "not written": the guard falls through to
   // delivery, and the write surfaces any real DB breakage loudly.
-  return chatRowsInWindow(afterSeq, uptoSeq).some(
-    (message) =>
-      message.platform_id === platformId && message.channel_type === channelType && message.content === content,
-  );
+  const added = chatRowDecoratorKeys();
+  return chatRowsInWindow(afterSeq, uptoSeq).some((message) => {
+    if (message.platform_id !== platformId || message.channel_type !== channelType) return false;
+    if (message.content === content) return true;
+    // A decorator may have added keys to the stored row. Compare again with
+    // those keys removed. Skipped entirely when no decorator has added any.
+    if (added.size === 0) return false;
+    try {
+      const rest = JSON.parse(message.content) as Record<string, unknown>;
+      for (const key of added) delete rest[key];
+      return JSON.stringify(rest) === content;
+    } catch {
+      return false;
+    }
+  });
 }
 
 /**

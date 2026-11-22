@@ -39,6 +39,7 @@ type ChatRowDecorator = (row: ChatRowInfo) => Record<string, unknown> | null;
 
 const observers: ProgressObserver[] = [];
 const decorators: ChatRowDecorator[] = [];
+const decoratorKeys = new Set<string>();
 
 function log(msg: string): void {
   console.error(`[progress-seam] ${msg}`);
@@ -73,7 +74,10 @@ export function decorateChatRow(row: ChatRowInfo): Record<string, unknown> {
   for (const fn of decorators) {
     try {
       const fields = fn(row);
-      if (fields) Object.assign(merged, fields);
+      if (fields) {
+        Object.assign(merged, fields);
+        for (const key of Object.keys(fields)) if (key !== 'text') decoratorKeys.add(key);
+      }
     } catch (err) {
       log(`decorator failed: ${errText(err)}`);
     }
@@ -82,7 +86,17 @@ export function decorateChatRow(row: ChatRowInfo): Record<string, unknown> {
   return merged;
 }
 
+/**
+ * Keys any decorator has ever added to a row (never `text`). Empty until a
+ * decorator returns fields, so callers can leave their behavior unchanged
+ * when nothing is registered.
+ */
+export function chatRowDecoratorKeys(): ReadonlySet<string> {
+  return decoratorKeys;
+}
+
 export function _resetProgressSeamForTesting(): void {
   observers.length = 0;
   decorators.length = 0;
+  decoratorKeys.clear();
 }

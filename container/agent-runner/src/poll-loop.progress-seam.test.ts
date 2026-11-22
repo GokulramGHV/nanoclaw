@@ -75,6 +75,31 @@ describe('poll-loop progress seam', () => {
     expect(JSON.parse(rows[0].content)).toEqual({ stream: 'stream-1', text: 'Hi there' });
   });
 
+  it('a verbatim repeat yields one chat row even when a decorator tags the first row', async () => {
+    let n = 0;
+    registerChatRowDecorator(() => ({ stream: `stream-${++n}` }));
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'text', text: '<message to="main">Hi there</message>' };
+      yield { type: 'text', text: '<message to="main">Hi there</message>' };
+      yield { type: 'result', text: '' };
+    }
+    await processQuery(stubQuery(events()), ROUTING, ['request-a'], 'claude', undefined, 'prompt', undefined, true);
+    const rows = getUndeliveredMessages().filter((r) => r.kind === 'chat');
+    expect(rows).toHaveLength(1);
+  });
+
+  it('a verbatim repeat yields one chat row with no decorator', async () => {
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'text', text: '<message to="main">Hi there</message>' };
+      yield { type: 'text', text: '<message to="main">Hi there</message>' };
+      yield { type: 'result', text: '' };
+    }
+    await processQuery(stubQuery(events()), ROUTING, ['request-a'], 'claude', undefined, 'prompt', undefined, true);
+    const rows = getUndeliveredMessages().filter((r) => r.kind === 'chat');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].content).toBe(JSON.stringify({ text: 'Hi there' }));
+  });
+
   it('sendToDestination content is unchanged with no decorator', async () => {
     async function* events(): AsyncGenerator<ProviderEvent> {
       yield { type: 'text', text: '<message to="main">Hi there</message>' };

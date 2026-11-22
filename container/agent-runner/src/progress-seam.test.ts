@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 
 import {
+  chatRowDecoratorKeys,
   _resetProgressSeamForTesting,
   decorateChatRow,
   emitProgress,
@@ -80,5 +81,12 @@ describe('chat row decorator', () => {
     } finally {
       errSpy.mockRestore();
     }
+  });
+
+  it('chatRowDecoratorKeys is empty with no decorator and lists added keys, never text', () => {
+    expect(chatRowDecoratorKeys().size).toBe(0);
+    registerChatRowDecorator(() => ({ stream: 's-3', text: 'x' }));
+    decorateChatRow(ROW);
+    expect([...chatRowDecoratorKeys()]).toEqual(['stream']);
   });
 });
