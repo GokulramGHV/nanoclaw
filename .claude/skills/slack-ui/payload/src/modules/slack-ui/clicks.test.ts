@@ -123,8 +123,21 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.unstubAllGlobals();
   await closeDb();
 });
+
+/** The group lookup sends its own form-encoded fetch, not slackCall. */
+function groupLookup(users: string[], before?: () => Promise<unknown>): void {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string) => {
+      if (!String(url).endsWith('/usergroups.users.list')) throw new Error(`unexpected fetch ${url}`);
+      if (before) await before();
+      return { ok: true, status: 200, json: async () => ({ ok: true, users }) };
+    }),
+  );
+}
 
 describe('handleCardAction', () => {
   it('returns false for a non-ncu id', async () => {
@@ -347,13 +360,7 @@ describe('fix round 1', () => {
 
   it('does not overwrite a card locked between load and write', async () => {
     await newCard();
-    call.mockImplementation(async (_t, method) => {
-      if (method === 'usergroups.users.list') {
-        await tryLock('c1', 'U9');
-        return { ok: true, users: ['U2'] };
-      }
-      return { ok: true };
-    });
+    groupLookup(['U2'], () => tryLock('c1', 'U9'));
     await handleCardAction(ev('ncu:c1:glock', { user: 'U2', raw: tick('ncu:c1:glock', ['x']) }), adapter, 'slack');
     expect((await getCard('c1'))!.state).toEqual({ pick: ['a', 'b'] });
     expect(write).not.toHaveBeenCalled();
@@ -377,9 +384,7 @@ describe('fix round 1', () => {
 
   it('applies a group rule through the group lookup', async () => {
     await newCard();
-    call.mockImplementation(async (_t, method) =>
-      method === 'usergroups.users.list' ? { ok: true, users: ['U2'] } : { ok: true },
-    );
+    groupLookup(['U2']);
     await handleCardAction(ev('ncu:c1:gbtn', { user: 'U3' }), adapter, 'slack');
     expect(write).not.toHaveBeenCalled();
     expect(call.mock.calls.some((c) => (c[2] as { text?: string }).text?.includes('<!subteam^S-GRP>'))).toBe(true);
