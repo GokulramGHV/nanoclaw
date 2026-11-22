@@ -60,7 +60,7 @@ afterEach(() => {
 });
 
 describe('poll-loop progress seam', () => {
-  it('sendToDestination writes the decorator\'s stream field into content and keeps text', async () => {
+  it("sendToDestination writes the decorator's stream field into content and keeps text", async () => {
     registerChatRowDecorator((row) => {
       expect(row).toEqual({ platformId: 'channel-1', channelType: 'slack', threadId: 'thread-a', body: 'Hi there' });
       return { stream: 'stream-1', text: 'not this' };
@@ -129,6 +129,43 @@ describe('poll-loop progress seam', () => {
     expect(order).toEqual(['turn_start', 'turn_end', 'turn_start', 'turn_end']);
     const starts = seen.filter((e): e is Extract<ProgressEvent, { type: 'turn_start' }> => e.type === 'turn_start');
     expect(starts[0].routing).toMatchObject({ threadId: 'thread-a', inReplyTo: 'request-a' });
+    expect(starts[0].messages.map((m) => m.id)).toEqual(['request-a']);
+    expect(starts[1].routing).toMatchObject({ threadId: 'thread-b', inReplyTo: 'request-b' });
+    expect(starts[1].messages.map((m) => m.id)).toEqual(['request-b']);
+  });
+
+  it('a follow-up pushed mid-turn emits turn_start only when its turn is adopted', async () => {
+    registerProgressObserver((e) => seen.push(e));
+    insertMessage('request-a', 'thread-a');
+    const controller = new AbortController();
+    const pushes: string[] = [];
+    let startsBeforeFirstResult = -1;
+    const provider: AgentProvider = {
+      registerMemorySessionHook: () => {},
+      isSessionInvalid: () => false,
+      query: () =>
+        stubQuery(
+          (async function* () {
+            insertMessage('request-b', 'thread-b');
+            await waitFor(() => pushes.length === 1);
+            startsBeforeFirstResult = seen.filter((e) => e.type === 'turn_start').length;
+            yield { type: 'result', text: '' } as ProviderEvent;
+            yield { type: 'result', text: '' } as ProviderEvent;
+            controller.abort();
+          })(),
+          pushes,
+        ),
+    };
+    await runPollLoop({
+      provider,
+      providerContract: CONTRACT,
+      providerName: 'mock',
+      cwd: '/workspace/agent',
+      signal: controller.signal,
+    });
+    expect(startsBeforeFirstResult).toBe(1);
+    expect(seen.map((e) => e.type)).toEqual(['turn_start', 'turn_end', 'turn_start', 'turn_end']);
+    const starts = seen.filter((e): e is Extract<ProgressEvent, { type: 'turn_start' }> => e.type === 'turn_start');
     expect(starts[0].messages.map((m) => m.id)).toEqual(['request-a']);
     expect(starts[1].routing).toMatchObject({ threadId: 'thread-b', inReplyTo: 'request-b' });
     expect(starts[1].messages.map((m) => m.id)).toEqual(['request-b']);
