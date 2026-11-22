@@ -49,6 +49,7 @@ async function listGroupMembers(token: string, groupId: string): Promise<unknown
     method: 'POST',
     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ usergroup: groupId }).toString(),
+    signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) throw new Error(`usergroups.users.list failed: HTTP ${res.status}`);
   const body = (await res.json()) as { ok?: unknown; error?: unknown; users?: unknown };

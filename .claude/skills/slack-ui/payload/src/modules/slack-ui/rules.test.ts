@@ -101,6 +101,7 @@ describe('createGroupCache', () => {
     expect(init.headers['Content-Type']).toBe('application/x-www-form-urlencoded');
     expect(init.headers.Authorization).toBe('Bearer xoxb-t');
     expect(String(init.body)).toBe('usergroup=S1');
+    expect(init.signal).toBeInstanceOf(AbortSignal);
     expect(call).not.toHaveBeenCalled();
   });
   it('calls Slack once within the TTL, again after it', async () => {
