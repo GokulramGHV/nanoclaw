@@ -177,6 +177,29 @@ describe('progress action', () => {
     expect(JSON.stringify(call.mock.calls[0][2])).not.toContain('"status":"pending"');
   });
 
+  it('invalid_blocks on a pending working card retries the post with an Up next line', async () => {
+    const err = Object.assign(new Error('slack chat.postMessage failed: invalid_blocks'), { name: 'SlackApiError' });
+    let refused = false;
+    call.mockImplementation(async (_t: string, method: string) => {
+      if (method === 'chat.postMessage' && !refused) {
+        refused = true;
+        throw err;
+      }
+      return { ok: true, ts: '200.1' };
+    });
+    const todos = [
+      { title: 'Now', status: 'in_progress' },
+      { title: 'Step', status: 'pending' },
+    ];
+    await handleProgress(content({ todos }), session);
+    const posts = call.mock.calls.filter((c) => c[1] === 'chat.postMessage');
+    expect(posts).toHaveLength(2);
+    expect(JSON.stringify(posts[0][2])).toContain('"status":"pending"');
+    expect(JSON.stringify(posts[1][2])).not.toContain('"status":"pending"');
+    expect(JSON.stringify(posts[1][2])).toContain('Up next: Step');
+    expect(plans.get('turn1').messageTs).toBe('200.1');
+  });
+
   it('a refused final update falls back to a plain text summary and still closes', async () => {
     await handleProgress(content(), session);
     call.mockClear();

@@ -11,6 +11,12 @@ import { pauseTypingRefreshAfterDelivery } from '../typing/index.js';
 
 export const STATUS_REFRESH_MS = 8000;
 const MAX_DOING_CHARS = 100;
+/** Wait for the generic "Typing..." call made at routing to land, then replace it. */
+export const WAKE_DELAY_MS = 700;
+/** A wake status with no plan behind it stops after this long; "Typing..." takes over again. */
+export const WAKE_MAX_MS = 3 * 60 * 1000;
+/** Turn ids for the status shown between routing and the turn's first progress row. */
+const WAKE_PREFIX = 'wake:';
 
 export interface StatusTarget {
   token: string;
@@ -23,10 +29,12 @@ interface Active extends StatusTarget {
   text: string;
   lines: string[];
   playful: string[];
+  since: number;
   timer: ReturnType<typeof setInterval>;
 }
 
 const active = new Map<string, Active>();
+const wakeTimers = new Map<string, ReturnType<typeof setTimeout>>();
 /** One chain per session so a clear can never be overtaken by an earlier send. */
 const chains = new Map<string, Promise<void>>();
 
@@ -34,6 +42,8 @@ const chains = new Map<string, Promise<void>>();
 export function resetStatusState(): void {
   for (const a of active.values()) clearInterval(a.timer);
   active.clear();
+  for (const t of wakeTimers.values()) clearTimeout(t);
+  wakeTimers.clear();
   chains.clear();
 }
 
@@ -135,17 +145,24 @@ export function setWorkingStatus(sessionId: string, turnId: string, target: Stat
     if (cur && cur.turnId === turnId && cur.text === text) return;
     if (cur) clearInterval(cur.timer);
     const hasLabel = text !== statusText(null);
-    // Keep the same playful picks for a turn so the rotation does not reshuffle on every step.
-    const playful = cur && cur.turnId === turnId ? cur.playful : pickPlayful(5);
+    // Keep the same playful picks for a turn (and from its wake status) so the rotation does not reshuffle.
+    const keep = cur && (cur.turnId === turnId || cur.turnId.startsWith(WAKE_PREFIX));
+    const playful = cur && keep ? cur.playful : pickPlayful(5);
     const a: Active = {
       ...target,
       turnId,
       text,
       playful,
       lines: loadingLines(text, hasLabel, playful),
+      since: cur && cur.turnId === turnId ? cur.since : Date.now(),
       timer: setInterval(() => {
         const now = active.get(sessionId);
-        if (now === a) refresh(sessionId, a);
+        if (now !== a) return;
+        if (a.turnId.startsWith(WAKE_PREFIX) && Date.now() - a.since > WAKE_MAX_MS) {
+          clearWorkingStatus(sessionId, a.turnId);
+          return;
+        }
+        refresh(sessionId, a);
       }, STATUS_REFRESH_MS),
     };
     a.timer.unref();
@@ -166,5 +183,42 @@ export function clearWorkingStatus(sessionId: string, turnId: string): void {
     send(sessionId, cur, '');
   } catch (err) {
     log.warn('slack-progress: status clear failed', { sessionId, err: String(err) });
+  }
+}
+
+/**
+ * Show the playful status as soon as a message is routed, instead of the generic
+ * "Typing...". The turn's first progress row takes it over. Skipped when a turn
+ * already owns the status. Never throws.
+ */
+export function startWakeStatus(sessionId: string, target: StatusTarget): void {
+  try {
+    const prev = wakeTimers.get(sessionId);
+    if (prev) clearTimeout(prev);
+    const timer = setTimeout(() => {
+      wakeTimers.delete(sessionId);
+      const cur = active.get(sessionId);
+      if (cur && !cur.turnId.startsWith(WAKE_PREFIX)) return;
+      setWorkingStatus(sessionId, cur?.turnId ?? `${WAKE_PREFIX}${Date.now()}`, target, null);
+    }, WAKE_DELAY_MS);
+    timer.unref();
+    wakeTimers.set(sessionId, timer);
+  } catch (err) {
+    log.warn('slack-progress: wake status failed', { sessionId, err: String(err) });
+  }
+}
+
+/** A reply is going out: drop a wake status (never a turn's own). Never throws. */
+export function clearWakeStatus(sessionId: string): void {
+  try {
+    const pending = wakeTimers.get(sessionId);
+    if (pending) {
+      clearTimeout(pending);
+      wakeTimers.delete(sessionId);
+    }
+    const cur = active.get(sessionId);
+    if (cur && cur.turnId.startsWith(WAKE_PREFIX)) clearWorkingStatus(sessionId, cur.turnId);
+  } catch (err) {
+    log.warn('slack-progress: wake status clear failed', { sessionId, err: String(err) });
   }
 }

@@ -64,6 +64,8 @@ payload/container/agent-runner/src/modules/slack-progress/streamer.test.ts -> co
 payload/container/agent-runner/src/modules/slack-progress/streamer.ts -> container/agent-runner/src/modules/slack-progress/streamer.ts
 payload/container/agent-runner/src/modules/slack-progress/tracker.test.ts -> container/agent-runner/src/modules/slack-progress/tracker.test.ts
 payload/container/agent-runner/src/modules/slack-progress/tracker.ts -> container/agent-runner/src/modules/slack-progress/tracker.ts
+payload/container/agent-runner/src/modules/slack-progress/hold.ts -> container/agent-runner/src/modules/slack-progress/hold.ts
+payload/container/agent-runner/src/modules/slack-progress/hold.test.ts -> container/agent-runner/src/modules/slack-progress/hold.test.ts
 payload/src/modules/slack-progress/a2a-rooms.ts -> src/modules/slack-progress/a2a-rooms.ts
 payload/src/modules/slack-progress/db/migrations.ts -> src/modules/slack-progress/db/migrations.ts
 payload/src/modules/slack-progress/db/progress.test.ts -> src/modules/slack-progress/db/progress.test.ts
@@ -86,6 +88,7 @@ payload/src/modules/slack-progress/sweep.test.ts -> src/modules/slack-progress/s
 payload/src/modules/slack-progress/sweep.ts -> src/modules/slack-progress/sweep.ts
 payload/src/modules/slack-progress/wake.test.ts -> src/modules/slack-progress/wake.test.ts
 payload/src/modules/slack-progress/wake.ts -> src/modules/slack-progress/wake.ts
+payload/src/modules/slack-progress/wake-status.ts -> src/modules/slack-progress/wake-status.ts
 ```
 
 ### Register the host module

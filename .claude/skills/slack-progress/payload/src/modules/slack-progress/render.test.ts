@@ -32,26 +32,32 @@ const sections = (blocks: unknown[]) =>
     .filter((b) => (b as { type: string }).type === 'section')
     .map((b) => (b as { text: { text: string } }).text.text);
 
+const contexts = (blocks: unknown[]) =>
+  blocks
+    .filter((b) => (b as { type: string }).type === 'context')
+    .map((b) => (b as { elements: { text: string }[] }).elements[0].text);
+
 describe('renderPlan (working view)', () => {
-  it('has a title section, cards for started steps and a Next section for pending ones', () => {
+  it('is one task card per step, pending ones included, with no title text and no plan block', () => {
     const { blocks } = renderPlan(row({ todos: three }));
-    expect(sections(blocks)[0]).toBe('Working, 1 of 3 steps done');
-    expect(blocks.some((b) => (b as { type: string }).type === 'plan')).toBe(false);
+    expect(blocks.every((b) => (b as { type: string }).type === 'task_card')).toBe(true);
     expect(cardsOf(blocks).map((c) => [c.title, c.status])).toEqual([
       ['First', 'complete'],
       ['Second', 'in_progress'],
+      ['Third', 'pending'],
     ]);
-    expect(cardsOf(blocks).map((c) => c.task_id)).toEqual(['t0', 't1']);
-    expect(sections(blocks)[1]).toBe('Next:\n• Third');
+    expect(cardsOf(blocks).map((c) => c.task_id)).toEqual(['t0', 't1', 't2']);
   });
 
-  it('never sends the pending status', () => {
-    expect(JSON.stringify(renderPlan(row({ todos: three })).blocks)).not.toContain('pending');
+  it('without pending support, waiting steps go in one small "Up next" line', () => {
+    const { blocks } = renderPlan(row({ todos: three }), { pendingOk: false });
+    expect(JSON.stringify(blocks)).not.toContain('"pending"');
+    expect(cardsOf(blocks).map((c) => c.title)).toEqual(['First', 'Second']);
+    expect(contexts(blocks)).toEqual(['Up next: Third']);
   });
 
-  it('task ids stay stable per step index as steps start', () => {
-    const later = three.map((t, i) => (i === 2 ? { ...t, status: 'in_progress' as const } : t));
-    expect(cardsOf(renderPlan(row({ todos: later })).blocks).map((c) => c.task_id)).toEqual(['t0', 't1', 't2']);
+  it('the fallback text names the step in progress', () => {
+    expect(renderPlan(row({ todos: three, doing: 'Reading files' })).text).toBe('Working: Second');
   });
 
   it('doing appears as the in-progress card details', () => {
@@ -61,11 +67,12 @@ describe('renderPlan (working view)', () => {
       elements: [{ type: 'rich_text_section', elements: [{ type: 'text', text: 'Reading files' }] }],
     });
     expect(cs[0].details).toBeUndefined();
+    expect(cs[2].details).toBeUndefined();
   });
 
   it('no todos gives one in_progress card titled with the doing text, or Working', () => {
     const a = renderPlan(row({ doing: 'Searching the web' }));
-    expect(sections(a.blocks)[0]).toBe('Working');
+    expect(a.blocks).toHaveLength(1);
     expect(cardsOf(a.blocks).map((c) => [c.title, c.status])).toEqual([['Searching the web', 'in_progress']]);
     expect(cardsOf(renderPlan(row()).blocks)[0].title).toBe('Working');
   });
@@ -77,18 +84,20 @@ describe('renderPlan (working view)', () => {
     }));
     const { blocks } = renderPlan(row({ todos }));
     expect(cardsOf(blocks)).toHaveLength(20);
-    expect(sections(blocks)).toContain('and 5 more steps');
+    expect(contexts(blocks)).toContain('and 50 more steps');
     expect(blocks.length).toBeLessThan(50);
   });
 
-  it('Next section never splits an escape entity when trimmed', () => {
+  it('Up next line never splits an escape entity when trimmed', () => {
     const todos = [
       { title: 'Now', status: 'in_progress' as const },
       ...Array.from({ length: 80 }, (_, i) => ({ title: `${i} ${'&<>'.repeat(40)}`, status: 'pending' as const })),
     ];
-    const next = sections(renderPlan(row({ todos })).blocks).find((s) => s.startsWith('Next:'))!;
+    const next = contexts(renderPlan(row({ todos }), { pendingOk: false }).blocks).find((s) =>
+      s.startsWith('Up next:'),
+    )!;
     expect(next.length).toBeLessThanOrEqual(3000);
-    expect(next).toMatch(/• and \d+ more$/);
+    expect(next).toMatch(/ and \d+ more$/);
     expect(next.replace(/&(amp|lt|gt);/g, '')).not.toContain('&');
   });
 
@@ -101,12 +110,13 @@ describe('renderPlan (working view)', () => {
         ],
         doing: 'ping <!channel> & <@U1>',
       }),
+      { pendingOk: false },
     );
     expect(text).toContain('&lt;!channel&gt;');
-    expect(text).toContain('&amp;');
     expect(text).not.toContain('<!channel>');
-    const next = sections(blocks).find((s) => s.startsWith('Next:'))!;
+    const next = contexts(blocks).find((s) => s.startsWith('Up next:'))!;
     expect(next).toContain('&lt;@U1&gt;');
+    expect(next).toContain('&amp;');
     expect(next).not.toContain('<@U1>');
   });
 });

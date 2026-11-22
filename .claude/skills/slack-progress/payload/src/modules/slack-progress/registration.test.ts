@@ -23,7 +23,9 @@ describe('slack-progress index', () => {
     const timer = vi.spyOn(globalThis, 'setInterval');
     await import('./index.js');
     expect(actions).toEqual(expect.arrayContaining(['progress', 'stream_append', 'stream_abort']));
-    expect(interceptors).toHaveLength(1);
+    // The wake-status clear first (it never handles a reply), then the stream interceptor.
+    expect(interceptors).toHaveLength(2);
+    expect((interceptors[0] as { name: string }).name).toBe('clearWakeOnReply');
     expect(migrations).toContain('module:slack-progress:create-tables');
     expect(wakeProviders).toContain('slack-progress');
     expect(timer).toHaveBeenCalledWith(expect.any(Function), 30000);

@@ -18,6 +18,7 @@ import { getStream, upsertStream, type StreamRow } from './db/progress.js';
 import { a2aRooms } from './a2a-rooms.js';
 import { withRateLimitRetry } from './rate-limit.js';
 import { isEnabled } from './settings.js';
+import { clearWakeStatus } from './status.js';
 
 const NOTE_BELOW = '_Reply posted below._';
 
@@ -192,6 +193,8 @@ export async function handleStreamAppend(content: Record<string, unknown>, sessi
     log.warn('slack-progress: dropped malformed stream_append row');
     return;
   }
+  // A reply is starting to stream: the wake status must not keep coming back over it.
+  clearWakeStatus(session.id);
   await enqueue(id, () => appendWork(content, session), undefined);
 }
 

@@ -58,7 +58,11 @@ interface OpenTurn {
   cancelFlush: (() => void) | null;
 }
 
-export function createProgressTracker(deps: TrackerDeps): { onEvent(e: ProgressEvent): void } {
+export function createProgressTracker(deps: TrackerDeps): {
+  onEvent(e: ProgressEvent): void;
+  /** True while this turn answers `platformId` and its task list still has unfinished steps. */
+  stepsOpen(platformId: string): boolean;
+} {
   let turn: OpenTurn | null = null;
   // The agent's task list lives for the whole session, so it is kept outside the turn.
   // Ids match the SDK's numbering: "1", "2", ... in creation order. The plan for a
@@ -227,5 +231,11 @@ export function createProgressTracker(deps: TrackerDeps): { onEvent(e: ProgressE
     }
   }
 
-  return { onEvent };
+  function stepsOpen(platformId: string): boolean {
+    const t = turn;
+    if (!t || !deps.enabled() || t.platformId !== platformId) return false;
+    return t.todos.some((x) => x.status !== 'completed');
+  }
+
+  return { onEvent, stepsOpen };
 }

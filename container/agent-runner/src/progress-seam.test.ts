@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 import {
   chatRowDecoratorKeys,
   _resetProgressSeamForTesting,
+  holdChatRow,
+  registerChatRowHold,
   decorateChatRow,
   emitProgress,
   registerChatRowDecorator,
@@ -88,5 +90,31 @@ describe('chat row decorator', () => {
     registerChatRowDecorator(() => ({ stream: 's-3', text: 'x' }));
     decorateChatRow(ROW);
     expect([...chatRowDecoratorKeys()]).toEqual(['stream']);
+  });
+});
+
+describe('chat row hold', () => {
+  const row = { platformId: 'slack:C1', channelType: 'slack', threadId: null, body: 'hi' };
+  const write = async () => {};
+
+  it('nothing registered: no hold', () => {
+    expect(holdChatRow(row, write)).toBe(false);
+  });
+
+  it('a hold that takes the row gets the write function', () => {
+    let got: unknown = null;
+    registerChatRowHold((_r, w) => {
+      got = w;
+      return true;
+    });
+    expect(holdChatRow(row, write)).toBe(true);
+    expect(got).toBe(write);
+  });
+
+  it('a throwing hold counts as no hold', () => {
+    registerChatRowHold(() => {
+      throw new Error('boom');
+    });
+    expect(holdChatRow(row, write)).toBe(false);
   });
 });

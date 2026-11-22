@@ -1,6 +1,9 @@
+import { botTokenKeyForInstance } from '../../channels/slack-lib.js';
+import { envValue } from '../../env.js';
 import { registerWakeContext, type ContextBlock, type WakeContextInput } from '../../wake-context.js';
 import { a2aRooms } from './a2a-rooms.js';
 import { isEnabled } from './settings.js';
+import { startWakeStatus } from './status.js';
 
 /** What the agent is told on each engaged message while progress display is on. Kept fixed so it adds little noise. */
 const DISPLAY_TEXT =
@@ -11,12 +14,23 @@ function channelOf(platformId: string): string {
   return id.split(':')[0];
 }
 
+/** Start the playful status line for this message's thread, when it has one. */
+function showWakeStatus(input: WakeContextInput): void {
+  const channel = channelOf(input.mg.platform_id);
+  const parts = (input.session.thread_id ?? '').split(':');
+  if (parts.length !== 3 || parts[0] !== 'slack' || parts[1] !== channel || !parts[2]) return;
+  const token = envValue(botTokenKeyForInstance(input.mg.instance ?? input.mg.channel_type));
+  if (!token) return;
+  startWakeStatus(input.session.id, { token, channel, threadTs: parts[2] });
+}
+
 /** Tell the agent its progress is already shown, so it stops narrating it. Never throws. */
 export async function progressDisplayContext(input: WakeContextInput): Promise<ContextBlock[]> {
   try {
     if (input.mg.channel_type !== 'slack') return [];
     if (a2aRooms().has(channelOf(input.mg.platform_id))) return [];
     if (!(await isEnabled(input.agentGroup.id))) return [];
+    showWakeStatus(input);
     return [
       {
         key: 'display',

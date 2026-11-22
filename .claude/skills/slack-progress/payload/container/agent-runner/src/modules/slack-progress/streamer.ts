@@ -36,6 +36,8 @@ export interface StreamerDeps {
   enabled(): boolean;
   newId(): string;
   resolve(to: string): { platformId: string; channelType: string } | null;
+  /** A block written now would be held back (steps still open), so it must not stream. */
+  held?(platformId: string): boolean;
 }
 
 const BATCH_MS = 500;
@@ -178,7 +180,12 @@ export function createStreamer(deps: StreamerDeps): {
         for (const op of t.splitter.feed(e.text)) {
           if (op.type === 'open') {
             const dest = deps.resolve(op.to);
-            if (dest && dest.channelType === 'slack' && dest.platformId === t.platformId) {
+            if (
+              dest &&
+              dest.channelType === 'slack' &&
+              dest.platformId === t.platformId &&
+              !deps.held?.(t.platformId)
+            ) {
               t.skipping = false;
               t.block = { id: deps.newId(), pending: '', full: '', sentRows: 0, cancelTimer: null };
             } else {

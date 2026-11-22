@@ -3,16 +3,27 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../wake-context.js', () => ({ registerWakeContext: vi.fn() }));
 vi.mock('./settings.js', () => ({ isEnabled: vi.fn() }));
 vi.mock('./a2a-rooms.js', () => ({ a2aRooms: vi.fn() }));
+vi.mock('./status.js', () => ({ startWakeStatus: vi.fn() }));
+vi.mock('../../channels/slack-lib.js', () => ({ botTokenKeyForInstance: (i: string) => `TOKEN_${i}` }));
+vi.mock('../../env.js', async (orig) => ({
+  ...(await orig<typeof import('../../env.js')>()),
+  envValue: vi.fn((k: string) => (k === 'TOKEN_slack' ? 'xoxb-test' : undefined)),
+}));
 
 import type { WakeContextInput } from '../../wake-context.js';
 import { a2aRooms } from './a2a-rooms.js';
 import { isEnabled } from './settings.js';
+import { startWakeStatus } from './status.js';
 import { progressDisplayContext } from './wake.js';
 
-function input(channelType = 'slack', platformId = 'slack:C1:1.2'): WakeContextInput {
+function input(
+  channelType = 'slack',
+  platformId = 'slack:C1:1.2',
+  threadId: string | null = 'slack:C1:5.5',
+): WakeContextInput {
   return {
     agentGroup: { id: 'ag1' },
-    session: { id: 's1' },
+    session: { id: 's1', thread_id: threadId },
     mg: { channel_type: channelType, platform_id: platformId },
     wiring: {},
     created: false,
@@ -23,6 +34,7 @@ function input(channelType = 'slack', platformId = 'slack:C1:1.2'): WakeContextI
 beforeEach(() => {
   vi.mocked(isEnabled).mockReset().mockResolvedValue(true);
   vi.mocked(a2aRooms).mockReset().mockReturnValue(new Set());
+  vi.mocked(startWakeStatus).mockReset();
 });
 
 describe('progressDisplayContext', () => {
@@ -59,5 +71,18 @@ describe('progressDisplayContext', () => {
   it('gives nothing when isEnabled throws', async () => {
     vi.mocked(isEnabled).mockRejectedValue(new Error('db down'));
     expect(await progressDisplayContext(input())).toEqual([]);
+  });
+
+  it('starts the wake status in the session thread', async () => {
+    await progressDisplayContext(input());
+    expect(startWakeStatus).toHaveBeenCalledWith('s1', { token: 'xoxb-test', channel: 'C1', threadTs: '5.5' });
+  });
+
+  it('no wake status without a thread in this chat, or when the group is off', async () => {
+    await progressDisplayContext(input('slack', 'slack:C1:1.2', null));
+    await progressDisplayContext(input('slack', 'slack:C1:1.2', 'slack:C9:5.5'));
+    vi.mocked(isEnabled).mockResolvedValue(false);
+    await progressDisplayContext(input());
+    expect(startWakeStatus).not.toHaveBeenCalled();
   });
 });

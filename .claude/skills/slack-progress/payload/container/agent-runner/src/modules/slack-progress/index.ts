@@ -5,7 +5,8 @@
 import fs from 'fs';
 import { findByName } from '../../destinations.js';
 import { writeMessageOut } from '../../db/messages-out.js';
-import { registerChatRowDecorator, registerProgressObserver } from '../../progress-seam.js';
+import { registerChatRowDecorator, registerChatRowHold, registerProgressObserver } from '../../progress-seam.js';
+import { createHold } from './hold.js';
 import { createStreamer, MARKER_PATH } from './streamer.js';
 import { createProgressTracker } from './tracker.js';
 
@@ -40,10 +41,17 @@ const streamer = createStreamer({
     if (!dest || dest.type !== 'channel' || !dest.platformId || !dest.channelType) return null;
     return { platformId: dest.platformId, channelType: dest.channelType };
   },
+  held: (platformId) => tracker.stepsOpen(platformId),
+});
+const hold = createHold({
+  stepsOpen: (platformId) => tracker.stepsOpen(platformId),
+  log: (msg) => console.error(`[slack-progress] ${msg}`),
 });
 
 registerProgressObserver((e) => {
   tracker.onEvent(e);
   streamer.onEvent(e);
+  hold.onEvent(e);
 });
+registerChatRowHold((row, write) => hold.offer(row, write));
 registerChatRowDecorator((row) => streamer.decorate(row));

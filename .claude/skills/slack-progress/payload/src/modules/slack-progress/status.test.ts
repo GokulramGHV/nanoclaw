@@ -8,14 +8,18 @@ import { slackCall } from '../../channels/slack-lib.js';
 import { log } from '../../log.js';
 import { pauseTypingRefreshAfterDelivery } from '../typing/index.js';
 import {
+  clearWakeStatus,
   clearWorkingStatus,
   loadingLines,
   pickPlayful,
   PLAYFUL_LINES,
   resetStatusState,
   setWorkingStatus,
+  startWakeStatus,
   statusText,
   STATUS_REFRESH_MS,
+  WAKE_DELAY_MS,
+  WAKE_MAX_MS,
 } from './status.js';
 
 const call = vi.mocked(slackCall);
@@ -122,5 +126,67 @@ describe('working status', () => {
     expect(() => setWorkingStatus('s1', 't1', target, 'Reading')).not.toThrow();
     await vi.advanceTimersByTimeAsync(0);
     expect(log.warn).toHaveBeenCalled();
+  });
+});
+
+describe('wake status', () => {
+  const lines = () => call.mock.calls.map((c) => (c[2] as { loading_messages?: string[] }).loading_messages);
+
+  it('shows playful lines after the delay, not before', async () => {
+    startWakeStatus('s1', target);
+    await vi.advanceTimersByTimeAsync(WAKE_DELAY_MS - 1);
+    expect(call).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(statuses()).toEqual(['is working']);
+    for (const l of lines()[0]!) expect(PLAYFUL_LINES).toContain(l);
+    expect(pause).toHaveBeenCalledWith('s1');
+  });
+
+  it("the turn's first progress takes over with the same playful picks", async () => {
+    startWakeStatus('s1', target);
+    await vi.advanceTimersByTimeAsync(WAKE_DELAY_MS);
+    const first = lines()[0]!;
+    setWorkingStatus('s1', 'turn1', target, 'Count lines');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(statuses()).toEqual(['is working', 'is working: Count lines']);
+    expect(lines()[1]).toEqual(['is working: Count lines', ...first.slice(0, 3)]);
+  });
+
+  it('does not replace a status a turn already owns', async () => {
+    setWorkingStatus('s1', 'turn1', target, 'Reading');
+    startWakeStatus('s1', target);
+    await vi.advanceTimersByTimeAsync(WAKE_DELAY_MS);
+    expect(statuses()).toEqual(['is working: Reading']);
+  });
+
+  it('a reply clears the wake status and stops its refresh', async () => {
+    startWakeStatus('s1', target);
+    await vi.advanceTimersByTimeAsync(WAKE_DELAY_MS);
+    clearWakeStatus('s1');
+    await vi.advanceTimersByTimeAsync(STATUS_REFRESH_MS * 3);
+    expect(statuses()).toEqual(['is working', '']);
+  });
+
+  it('a reply before the delay cancels it', async () => {
+    startWakeStatus('s1', target);
+    clearWakeStatus('s1');
+    await vi.advanceTimersByTimeAsync(WAKE_DELAY_MS * 2);
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it("a reply never clears a turn's own status", async () => {
+    setWorkingStatus('s1', 'turn1', target, 'Reading');
+    clearWakeStatus('s1');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(statuses()).toEqual(['is working: Reading']);
+  });
+
+  it('a wake status with no plan behind it gives up after the cap', async () => {
+    startWakeStatus('s1', target);
+    await vi.advanceTimersByTimeAsync(WAKE_DELAY_MS + WAKE_MAX_MS + STATUS_REFRESH_MS);
+    expect(statuses().at(-1)).toBe('');
+    const n = call.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(STATUS_REFRESH_MS * 3);
+    expect(call.mock.calls.length).toBe(n);
   });
 });

@@ -31,7 +31,7 @@ interface Live {
 
 const live = new Map<string, Live>();
 const chains = new Map<string, Promise<void>>();
-/** Slack may answer invalid_blocks to a pending card in the summary: remember it for this process. */
+/** Slack may answer invalid_blocks to a pending task card: remember it for this process. */
 let pendingOk = true;
 
 /** Test hook: forget all in-memory state. */
@@ -87,7 +87,7 @@ function isInvalidBlocks(err: unknown): boolean {
   return err instanceof Error && err.name === 'SlackApiError' && err.message.includes('invalid_blocks');
 }
 
-/** Send one post or update; on invalid_blocks for a pending summary card, retry once without pending. */
+/** Send one post or update; on invalid_blocks with a pending card, retry once without pending cards. */
 async function send(
   method: 'chat.postMessage' | 'chat.update',
   token: string,
@@ -95,19 +95,15 @@ async function send(
   row: ProgressRow,
 ): Promise<Record<string, unknown>> {
   const build = () => {
-    const r = row.outcome === 'working' ? renderPlan(row) : renderSummary(row, { pendingOk });
+    const r = row.outcome === 'working' ? renderPlan(row, { pendingOk }) : renderSummary(row, { pendingOk });
     return { ...base, text: r.text, blocks: r.blocks };
   };
   try {
     return await withRateLimitRetry(() => slackCall(token, method, build(), 'progress'));
   } catch (err) {
-    if (
-      pendingOk &&
-      row.outcome !== 'working' &&
-      isInvalidBlocks(err) &&
-      row.todos.some((t) => t.status === 'pending')
-    ) {
+    if (pendingOk && isInvalidBlocks(err) && row.todos.some((t) => t.status === 'pending')) {
       pendingOk = false;
+      log.warn('slack-progress: Slack refused a pending task card, listing waiting steps as text');
       return await withRateLimitRetry(() => slackCall(token, method, build(), 'progress'));
     }
     throw err;

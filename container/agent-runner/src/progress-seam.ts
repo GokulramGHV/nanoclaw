@@ -6,8 +6,10 @@
  *   turn ended.
  * - A chat row decorator may add fields to the content of a `chat` row
  *   written for a complete <message> block. It can never replace `text`.
+ * - A chat row hold may take a row before it is written and write it later,
+ *   or drop it.
  *
- * With nothing registered, both are no-ops and nothing changes.
+ * With nothing registered, all are no-ops and nothing changes.
  *
  * A retry can end with a second turn_end and no new turn_start; observers ignore a turn_end with no open turn.
  */
@@ -36,10 +38,13 @@ export interface ChatRowInfo {
 
 type ProgressObserver = (e: ProgressEvent) => void;
 type ChatRowDecorator = (row: ChatRowInfo) => Record<string, unknown> | null;
+/** Return true to take the row: the hold then owns `write` and may call it later, or never. */
+type ChatRowHold = (row: ChatRowInfo, write: () => Promise<void>) => boolean;
 
 const observers: ProgressObserver[] = [];
 const decorators: ChatRowDecorator[] = [];
 const decoratorKeys = new Set<string>();
+const holds: ChatRowHold[] = [];
 
 function log(msg: string): void {
   console.error(`[progress-seam] ${msg}`);
@@ -86,6 +91,25 @@ export function decorateChatRow(row: ChatRowInfo): Record<string, unknown> {
   return merged;
 }
 
+export function registerChatRowHold(fn: ChatRowHold): void {
+  holds.push(fn);
+}
+
+/**
+ * Offer a chat row to every hold before it is written. True means a hold took it
+ * and the caller must not write it. Never throws; a failing hold counts as false.
+ */
+export function holdChatRow(row: ChatRowInfo, write: () => Promise<void>): boolean {
+  for (const fn of holds) {
+    try {
+      if (fn(row, write)) return true;
+    } catch (err) {
+      log(`hold failed: ${errText(err)}`);
+    }
+  }
+  return false;
+}
+
 /**
  * Keys any decorator has ever added to a row (never `text`). Empty until a
  * decorator returns fields, so callers can leave their behavior unchanged
@@ -99,4 +123,5 @@ export function _resetProgressSeamForTesting(): void {
   observers.length = 0;
   decorators.length = 0;
   decoratorKeys.clear();
+  holds.length = 0;
 }

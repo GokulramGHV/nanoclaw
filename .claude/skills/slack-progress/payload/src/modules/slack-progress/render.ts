@@ -1,7 +1,7 @@
 /**
- * Pure rendering of the progress message. While working it is a title line plus one
- * standalone `task_card` per started step (these render open). When the turn ends it is
- * redrawn as one `plan` block summary (this collapses, which is fine at the end).
+ * Pure rendering of the progress message. While working it is one standalone
+ * `task_card` per step (these render open). When the turn ends it is redrawn as one
+ * `plan` block summary (this collapses, which is fine at the end).
  */
 
 export interface ProgressTodo {
@@ -96,28 +96,45 @@ function bulletSection(head: string, titles: string[]): unknown {
 }
 
 /**
- * The working view. Standalone task cards render open in Slack, a `plan` block does not, so
- * started steps are cards and steps not started yet are listed as plain text (no 'pending' status).
+ * The working view: one standalone task card per step (standalone cards render open,
+ * a `plan` block does not). With `pendingOk` false (Slack refused a pending card),
+ * steps not started yet are listed in one small grey line instead.
  */
-export function renderPlan(row: ProgressRow): { text: string; blocks: unknown[] } {
+export function renderPlan(
+  row: ProgressRow,
+  opts: { pendingOk: boolean } = { pendingOk: true },
+): { text: string; blocks: unknown[] } {
   const all = cards(row, 'working', Infinity);
-  const started = all.filter((c) => c.status !== 'pending');
-  const waiting = row.todos.filter((t) => t.status === 'pending').map((t) => t.title);
-  const shown = started.slice(0, MAX_WORKING_CARDS);
-  const done = row.todos.filter((t) => t.status === 'completed').length;
-  const head =
-    row.todos.length > 0
-      ? `Working, ${done} of ${row.todos.length} ${row.todos.length === 1 ? 'step' : 'steps'} done`
-      : 'Working';
+  const listed = opts.pendingOk ? all : all.filter((c) => c.status !== 'pending');
+  const waiting = opts.pendingOk ? [] : all.filter((c) => c.status === 'pending').map((c) => c.title);
+  const shown = listed.slice(0, MAX_WORKING_CARDS);
   const active = row.todos.find((t) => t.status === 'in_progress')?.title;
-  const text = escapeMrkdwn(clip(`Working: ${row.doing ?? active ?? '...'}`, 300));
-  const blocks: unknown[] = [{ type: 'section', text: { type: 'mrkdwn', text: escapeMrkdwn(head) } }, ...shown];
-  if (started.length > shown.length) {
-    const n = started.length - shown.length;
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `and ${n} more ${n === 1 ? 'step' : 'steps'}` } });
+  const text = escapeMrkdwn(clip(`Working: ${active ?? row.doing ?? '...'}`, 300));
+  const blocks: unknown[] = [...shown];
+  if (listed.length > shown.length) {
+    const n = listed.length - shown.length;
+    blocks.push(context(`and ${n} more ${n === 1 ? 'step' : 'steps'}`));
   }
-  if (waiting.length > 0) blocks.push(bulletSection('Next:', waiting));
+  if (waiting.length > 0) blocks.push(context(upNext(waiting)));
   return { text, blocks };
+}
+
+function context(mrkdwn: string): unknown {
+  return { type: 'context', elements: [{ type: 'mrkdwn', text: mrkdwn }] };
+}
+
+/** "Up next: a · b · c", whole titles only, inside the text limit. */
+function upNext(titles: string[]): string {
+  let out = 'Up next:';
+  let shown = 0;
+  for (const t of titles) {
+    const part = `${shown === 0 ? ' ' : ' · '}${escapeMrkdwn(clip(t, TITLE_MAX) || 'Step')}`;
+    if (out.length + part.length + 20 > TEXT_MAX) break;
+    out += part;
+    shown++;
+  }
+  if (shown < titles.length) out += ` and ${titles.length - shown} more`;
+  return out;
 }
 
 /** Plain-text close for when Slack refuses the plan block, so a message is never left in the working state. */

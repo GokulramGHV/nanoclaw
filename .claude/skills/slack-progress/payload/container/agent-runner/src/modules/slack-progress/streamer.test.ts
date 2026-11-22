@@ -47,7 +47,11 @@ function start(
 }
 
 function setup(
-  opts: { enabled?: boolean; resolveTo?: (to: string) => { platformId: string; channelType: string } | null } = {},
+  opts: {
+    enabled?: boolean;
+    resolveTo?: (to: string) => { platformId: string; channelType: string } | null;
+    held?: (platformId: string) => boolean;
+  } = {},
 ) {
   let t = 1_000_000;
   const timers: { at: number; fn: () => void; live: boolean }[] = [];
@@ -66,6 +70,7 @@ function setup(
     enabled: () => opts.enabled ?? true,
     newId: () => `s-${++n}`,
     resolve: opts.resolveTo ?? (() => ({ platformId: CHAT, channelType: 'slack' })),
+    held: opts.held,
   });
   function advance(ms: number) {
     const target = t + ms;
@@ -94,6 +99,15 @@ describe('streamer', () => {
     expect(s.rows).toEqual([
       { action: 'stream_append', streamId: 's-1', platformId: CHAT, threadId: 't1', recipient: 'U123', text: 'hello' },
     ]);
+  });
+
+  test('no stream for a block that would be held back (steps still open)', () => {
+    const s = setup({ held: () => true });
+    s.streamer.onEvent(start());
+    s.text('<message to="room">Still working</message>');
+    s.advance(1000);
+    expect(s.rows).toEqual([]);
+    expect(s.streamer.decorate(rowFor('Still working'))).toBeNull();
   });
 
   test('no stream when threadId is null', () => {

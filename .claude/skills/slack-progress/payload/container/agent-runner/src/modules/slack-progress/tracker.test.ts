@@ -298,4 +298,26 @@ describe('progress tracker', () => {
       ]);
     });
   });
+
+  test('stepsOpen is true only while this turn answers that chat and has unfinished steps', () => {
+    const { tracker } = setup();
+    expect(tracker.stepsOpen('C1')).toBe(false);
+    tracker.onEvent(start());
+    expect(tracker.stepsOpen('C1')).toBe(false);
+    tracker.onEvent(todos('completed', 'in_progress'));
+    expect(tracker.stepsOpen('C1')).toBe(true);
+    expect(tracker.stepsOpen('C2')).toBe(false);
+    tracker.onEvent(todos('completed', 'completed'));
+    expect(tracker.stepsOpen('C1')).toBe(false);
+    tracker.onEvent(todos('pending'));
+    tracker.onEvent({ type: 'turn_end', outcome: 'done' });
+    expect(tracker.stepsOpen('C1')).toBe(false);
+  });
+
+  test('stepsOpen is false when the feature is off', () => {
+    const { tracker } = setup({ enabled: false });
+    tracker.onEvent(start());
+    tracker.onEvent(todos('pending'));
+    expect(tracker.stepsOpen('C1')).toBe(false);
+  });
 });

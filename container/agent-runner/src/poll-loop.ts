@@ -31,7 +31,7 @@ import {
   type RoutingContext,
 } from './formatter.js';
 import { stripHarnessTagArtifacts } from './harness-tag-strip.js';
-import { chatRowDecoratorKeys, decorateChatRow, emitProgress } from './progress-seam.js';
+import { chatRowDecoratorKeys, decorateChatRow, emitProgress, holdChatRow } from './progress-seam.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 import type { ProviderRuntimeContract } from './provider-contracts/registry.js';
@@ -1376,15 +1376,22 @@ async function sendToDestination(dest: DestinationEntry, body: string, routing: 
   // thread onto another.
   const destRouting = resolveDestinationThread(channelType, platformId, routing);
   const threadId = destRouting?.threadId ?? null;
-  await writeMessageOut({
-    id: generateId(),
-    in_reply_to: destRouting?.inReplyTo ?? routing.inReplyTo,
-    kind: 'chat',
-    platform_id: platformId,
-    channel_type: channelType,
-    thread_id: threadId,
-    content: JSON.stringify({ ...decorateChatRow({ platformId, channelType, threadId, body }), text: body }),
-  });
+  const info = { platformId, channelType, threadId, body };
+  const inReplyTo = destRouting?.inReplyTo ?? routing.inReplyTo;
+  const write = async (): Promise<void> => {
+    await writeMessageOut({
+      id: generateId(),
+      in_reply_to: inReplyTo,
+      kind: 'chat',
+      platform_id: platformId,
+      channel_type: channelType,
+      thread_id: threadId,
+      content: JSON.stringify({ ...decorateChatRow(info), text: body }),
+    });
+  };
+  // A registered hold may take the row and write it later, or drop it.
+  if (holdChatRow(info, write)) return;
+  await write();
 }
 
 /** Publish `routing` as the reply stamp the MCP tools read (null route clears it). */
