@@ -129,4 +129,20 @@ describe('sweepOnce', () => {
     await expect(sweepOnce(NOW)).resolves.toBeUndefined();
     expect(log.warn).toHaveBeenCalled();
   });
+
+  it('closes a plan and a stream even when every Slack call and the state parse fail', async () => {
+    vi.mocked(slackCall).mockRejectedValue(new Error('boom'));
+    stale([planRow(), planRow({ turnId: 't2', stateJson: '{bad' })], [streamRow()]);
+    await sweepOnce(NOW);
+    expect(progressDb.closePlan).toHaveBeenCalledWith('t1');
+    expect(progressDb.closePlan).toHaveBeenCalledWith('t2');
+    expect(progressDb.upsertStream).toHaveBeenCalledWith(expect.objectContaining({ status: 'stopped' }));
+  });
+
+  it('marks a stream stopped even when the session lookup throws', async () => {
+    vi.mocked(getSession).mockRejectedValue(new Error('db'));
+    stale([], [streamRow()]);
+    await sweepOnce(NOW);
+    expect(progressDb.upsertStream).toHaveBeenCalledWith(expect.objectContaining({ status: 'stopped' }));
+  });
 });
