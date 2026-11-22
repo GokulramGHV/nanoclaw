@@ -90,7 +90,7 @@ async function send(
   row: ProgressRow,
 ): Promise<Record<string, unknown>> {
   const build = () => {
-    const r = row.outcome === 'working' ? renderPlan(row, { pendingOk }) : renderSummary(row);
+    const r = row.outcome === 'working' ? renderPlan(row, { pendingOk }) : renderSummary(row, { pendingOk });
     return { ...base, text: r.text, blocks: r.blocks };
   };
   try {
@@ -106,7 +106,7 @@ async function send(
 
 async function persist(turnId: string, entry: Live, messageTs: string, row: ProgressRow, closed: boolean) {
   const plan = await getPlan(turnId);
-  if (!plan) return;
+  if (!plan || plan.closed) return;
   const next: PlanRow = {
     ...plan,
     messageTs,
@@ -126,6 +126,7 @@ async function draw(turnId: string, ts: string): Promise<void> {
   entry.lastDrawMs = Date.now();
   try {
     await send('chat.update', entry.token, { channel: entry.channel, ts }, row);
+    if (entry.closed) return;
     await persist(turnId, entry, ts, row, false);
   } catch (err) {
     log.warn('slack-progress: plan update failed', { turnId, err: String(err) });
@@ -144,7 +145,9 @@ async function finish(turnId: string, ts: string, row: ProgressRow): Promise<voi
   } catch (err) {
     log.warn('slack-progress: summary update failed', { turnId, err: String(err) });
   }
-  await closePlan(turnId).catch(() => {});
+  await closePlan(turnId).catch((err) => {
+    log.warn('slack-progress: could not close plan', { turnId, err: String(err) });
+  });
   live.delete(turnId);
 }
 
@@ -219,8 +222,19 @@ async function process_(row: ProgressRow, content: Record<string, unknown>, sess
   if (wait <= 0) {
     await draw(row.turnId, ts);
   } else {
-    entry.timer = setTimeout(() => void draw(row.turnId, ts), wait);
+    entry.timer = setTimeout(() => void enqueue(row.turnId, () => draw(row.turnId, ts)), wait);
   }
+}
+
+/** Run work for one turn after earlier work for it, so a timer draw never races a post or the summary. */
+async function enqueue(turnId: string, fn: () => Promise<void>): Promise<void> {
+  const prev = chains.get(turnId) ?? Promise.resolve();
+  const run = prev.then(fn).catch((err) => {
+    log.warn('slack-progress: queued plan work failed', { turnId, err: String(err) });
+  });
+  chains.set(turnId, run);
+  await run;
+  if (chains.get(turnId) === run) chains.delete(turnId);
 }
 
 export async function handleProgress(content: Record<string, unknown>, session: Session): Promise<void> {
@@ -229,18 +243,13 @@ export async function handleProgress(content: Record<string, unknown>, session: 
     log.warn('slack-progress: dropped malformed progress row');
     return;
   }
-  // Rows for one turn run one after another so the first post cannot race a later edit.
-  const prev = chains.get(row.turnId) ?? Promise.resolve();
-  const run = prev.then(async () => {
+  await enqueue(row.turnId, async () => {
     try {
       await process_(row, content, session);
     } catch (err) {
       log.warn('slack-progress: progress action failed', { turnId: row.turnId, err: String(err) });
     }
   });
-  chains.set(row.turnId, run);
-  await run;
-  if (chains.get(row.turnId) === run) chains.delete(row.turnId);
 }
 
 registerDeliveryAction('progress', handleProgress, unguarded("posts only into the session's own chat"));

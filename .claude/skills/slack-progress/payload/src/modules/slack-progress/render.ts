@@ -91,13 +91,18 @@ export function renderPlan(row: ProgressRow, opts: { pendingOk: boolean }): { te
   return { text, blocks };
 }
 
-export function renderSummary(row: ProgressRow): { text: string; blocks: unknown[] } {
+export function renderSummary(
+  row: ProgressRow,
+  opts: { pendingOk: boolean } = { pendingOk: true },
+): { text: string; blocks: unknown[] } {
   const failed = row.outcome === 'error';
   const steps = row.todos.length;
   const head = failed
     ? `Stopped after ${seconds(row.elapsedMs)}`
     : `Done in ${seconds(row.elapsedMs)}${steps > 0 ? `, ${steps} ${steps === 1 ? 'step' : 'steps'}` : ''}`;
-  const list = cards(row, row.outcome).filter((c) => c.status !== 'pending');
+  let list = cards(row, row.outcome);
+  const held = opts.pendingOk ? [] : list.filter((c) => c.status === 'pending');
+  if (!opts.pendingOk) list = list.filter((c) => c.status !== 'pending');
   // Keep the top-level text well inside Slack's 3000-character limit.
   const lines = row.todos.map((t) => escapeMrkdwn(clip(t.title, TITLE_MAX)));
   let text = head;
@@ -106,5 +111,9 @@ export function renderSummary(row: ProgressRow): { text: string; blocks: unknown
     text += `\n• ${l}`;
   }
   const blocks: unknown[] = list.length > 0 ? [{ type: 'plan', title: head, tasks: list }] : [];
+  if (held.length > 0) {
+    const rest = held.map((c) => `• ${escapeMrkdwn(c.title)}`).join('\n');
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: `Not done:\n${rest}`.slice(0, TEXT_MAX) } });
+  }
   return { text: text.slice(0, TEXT_MAX), blocks };
 }

@@ -84,7 +84,16 @@ describe('renderSummary', () => {
   it('error outcome gives "Stopped after 42s" and marks the in-progress card error', () => {
     const { text, blocks } = renderSummary(row({ todos: three, outcome: 'error' }));
     expect(text.split('\n')[0]).toBe('Stopped after 42s');
-    expect(planOf(blocks).tasks.map((t) => t.status)).toEqual(['complete', 'error']);
+    expect(planOf(blocks).tasks.map((t) => t.status)).toEqual(['complete', 'error', 'pending']);
+  });
+
+  it('keeps every step title readable, pending ones in a fallback section when pending is refused', () => {
+    const plan = renderSummary(row({ todos: three, outcome: 'done' }));
+    expect(planOf(plan.blocks).tasks.map((t) => t.title)).toEqual(['First', 'Second', 'Third']);
+    const { blocks } = renderSummary(row({ todos: three, outcome: 'done' }), { pendingOk: false });
+    expect(planOf(blocks).tasks.map((t) => t.title)).toEqual(['First', 'Second']);
+    const section = blocks.find((b) => (b as { type: string }).type === 'section') as { text: { text: string } };
+    expect(section.text.text).toContain('Third');
   });
 
   it("step titles in the summary stay within Slack's 3000-character text limit", () => {
