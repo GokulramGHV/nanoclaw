@@ -170,4 +170,32 @@ describe('poll-loop progress seam', () => {
     expect(starts[1].routing).toMatchObject({ threadId: 'thread-b', inReplyTo: 'request-b' });
     expect(starts[1].messages.map((m) => m.id)).toEqual(['request-b']);
   });
+
+  it('a turn that throws before its result emits turn_end error', async () => {
+    registerProgressObserver((e) => seen.push(e));
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'text', text: 'working' };
+      throw new Error('provider failed');
+    }
+    await expect(
+      processQuery(stubQuery(events()), ROUTING, ['request-a'], 'claude', undefined, 'prompt', undefined, true),
+    ).rejects.toThrow('provider failed');
+    expect(seen).toEqual([{ type: 'turn_end', outcome: 'error' }]);
+  });
+
+  it('a stream that closes mid-turn (abort) emits turn_end error, an idle close emits nothing more', async () => {
+    registerProgressObserver((e) => seen.push(e));
+    async function* aborted(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'text', text: 'working' };
+    }
+    await processQuery(stubQuery(aborted()), ROUTING, ['request-a'], 'claude', undefined, 'prompt', undefined, true);
+    expect(seen).toEqual([{ type: 'turn_end', outcome: 'error' }]);
+
+    seen.length = 0;
+    async function* finished(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'result', text: '' };
+    }
+    await processQuery(stubQuery(finished()), ROUTING, ['request-a'], 'claude', undefined, 'prompt', undefined, true);
+    expect(seen).toEqual([{ type: 'turn_end', outcome: 'done' }]);
+  });
 });

@@ -767,6 +767,8 @@ export async function processQuery(
   } finally {
     done = true;
     clearInterval(pollHandle);
+    // A turn that ends without a result (throw, abort, closed stream) still ends.
+    if (answering) emitProgress({ type: 'turn_end', outcome: 'error' });
   }
 
   return { continuation: queryContinuation };

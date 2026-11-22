@@ -8,6 +8,8 @@
  *   written for a complete <message> block. It can never replace `text`.
  *
  * With nothing registered, both are no-ops and nothing changes.
+ *
+ * A retry can end with a second turn_end and no new turn_start; observers ignore a turn_end with no open turn.
  */
 import type { MessageInRow } from './db/messages-in.js';
 import type { RoutingContext } from './formatter.js';

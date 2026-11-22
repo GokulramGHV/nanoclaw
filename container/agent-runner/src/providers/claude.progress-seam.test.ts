@@ -117,4 +117,28 @@ describe('translateEvents progress events', () => {
     // The text event is still yielded as before.
     expect(types.filter((t) => t === 'text')).toHaveLength(1);
   });
+
+  it('skips progress events from subagent output (parent_tool_use_id set)', async () => {
+    sdkMessages.push(
+      { type: 'system', subtype: 'init', session_id: 'sess-1' },
+      { ...(delta('sub') as object), parent_tool_use_id: 'task-1' },
+      {
+        type: 'assistant',
+        parent_tool_use_id: 'task-1',
+        message: { content: [{ type: 'tool_use', id: 's1', name: 'TodoWrite', input: { todos: [] } }] },
+      },
+      delta('main'),
+      {
+        type: 'assistant',
+        parent_tool_use_id: null,
+        message: { content: [{ type: 'tool_use', id: 'm1', name: 'Read', input: { file_path: '/x' } }] },
+      },
+      { type: 'result', subtype: 'success', result: 'done' },
+    );
+    await drive();
+    expect(seen).toEqual([
+      { type: 'text_delta', text: 'main' },
+      { type: 'tool', name: 'Read', input: { file_path: '/x' } },
+    ]);
+  });
 });

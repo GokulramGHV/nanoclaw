@@ -332,12 +332,15 @@ export class ClaudeProvider implements AgentProvider {
       for await (const message of sdkResult) {
         if (aborted) return;
 
+        // Progress events are for the main agent only; subagent output carries parent_tool_use_id.
+        const fromSubagent = !!(message as { parent_tool_use_id?: string | null }).parent_tool_use_id;
+
         // Yield activity for every SDK event so the poll loop knows the agent
         // is working. Deltas arrive per token and carry no content for us, so
         // they count at most once per second, and not as messages.
         if (message.type === 'stream_event') {
           const ev = (message as { event?: { type?: string; delta?: { type?: string; text?: string } } }).event;
-          if (ev?.type === 'content_block_delta' && ev.delta?.type === 'text_delta' && ev.delta.text) {
+          if (!fromSubagent && ev?.type === 'content_block_delta' && ev.delta?.type === 'text_delta' && ev.delta.text) {
             emitProgress({ type: 'text_delta', text: ev.delta.text });
           }
           const now = Date.now();
@@ -371,7 +374,7 @@ export class ClaudeProvider implements AgentProvider {
           const content = (message as { message?: { content?: Array<{ type?: string; text?: string }> } }).message
             ?.content;
           if (Array.isArray(content)) {
-            emitToolProgress(content);
+            if (!fromSubagent) emitToolProgress(content);
             const text = content
               .filter((block) => block.type === 'text' && block.text)
               .map((block) => block.text)
