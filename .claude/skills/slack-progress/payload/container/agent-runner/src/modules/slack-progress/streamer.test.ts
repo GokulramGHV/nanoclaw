@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { MessageInRow } from '../../db/messages-in.js';
 import type { ProgressEvent } from '../../progress-seam.js';
-import { createStreamer, type StreamAppendRow } from './streamer.js';
+import { createStreamer, type StreamAbortRow, type StreamAppendRow } from './streamer.js';
 
 const CHAT = 'slack:C1';
 
@@ -51,7 +51,7 @@ function setup(
 ) {
   let t = 1_000_000;
   const timers: { at: number; fn: () => void; live: boolean }[] = [];
-  const rows: StreamAppendRow[] = [];
+  const rows: (StreamAppendRow | StreamAbortRow)[] = [];
   let n = 0;
   const streamer = createStreamer({
     now: () => t,
@@ -83,6 +83,7 @@ function setup(
 }
 
 const chatRow = { platformId: CHAT, channelType: 'slack', threadId: 't1', body: 'x' };
+const rowFor = (body: string) => ({ ...chatRow, body });
 
 describe('streamer', () => {
   test("streams when to resolves to the turn's own slack chat with a thread and one human sender", () => {
@@ -161,10 +162,10 @@ describe('streamer', () => {
     s.text('c');
     expect(s.rows).toEqual([]);
     s.advance(100);
-    expect(s.rows.map((r) => r.text)).toEqual(['abc']);
+    expect(s.rows.map((r) => (r as StreamAppendRow).text)).toEqual(['abc']);
     s.text('d');
     s.advance(500);
-    expect(s.rows.map((r) => r.text)).toEqual(['abc', 'd']);
+    expect(s.rows.map((r) => (r as StreamAppendRow).text)).toEqual(['abc', 'd']);
   });
 
   test('recipient is the raw platform user id', () => {
@@ -172,17 +173,18 @@ describe('streamer', () => {
     s.streamer.onEvent(start([msg({ content: { author: { userId: 'U777' }, text: 'x' } })]));
     s.text('<message to="room">hi</message>');
     s.advance(500);
-    expect(s.rows[0].recipient).toBe('U777');
+    expect((s.rows[0] as StreamAppendRow).recipient).toBe('U777');
   });
 
-  test("decorate returns {stream: id} for the matching closed block's chat row, oldest first per platformId", () => {
+  test('decorate returns {stream: id} for the closed block whose text matches the row body, oldest match first per platformId', () => {
     const s = setup();
     s.streamer.onEvent(start());
-    s.text('<message to="room">one</message><message to="room">two</message>');
+    s.text('<message to="room">one</message><message to="room">one</message><message to="room">two</message>');
     s.advance(500);
-    expect(s.streamer.decorate(chatRow)).toEqual({ stream: 's-1' });
-    expect(s.streamer.decorate(chatRow)).toEqual({ stream: 's-2' });
-    expect(s.streamer.decorate(chatRow)).toBeNull();
+    expect(s.streamer.decorate(rowFor('one'))).toEqual({ stream: 's-1' });
+    expect(s.streamer.decorate(rowFor('one'))).toEqual({ stream: 's-2' });
+    expect(s.streamer.decorate(rowFor(' two '))).toEqual({ stream: 's-3' });
+    expect(s.streamer.decorate(rowFor('one'))).toBeNull();
   });
 
   test('decorate returns null for a block that never streamed', () => {
@@ -190,8 +192,9 @@ describe('streamer', () => {
     s.streamer.onEvent(start());
     s.text('<message to="room"></message><message to="room">real</message>');
     s.advance(500);
-    expect(s.streamer.decorate(chatRow)).toBeNull();
-    expect(s.streamer.decorate(chatRow)).toEqual({ stream: 's-2' });
+    expect(s.streamer.decorate(rowFor(''))).toBeNull();
+    expect(s.streamer.decorate(rowFor('real'))).toEqual({ stream: 's-2' });
+    expect(s.rows.filter((r) => r.action === 'stream_abort')).toEqual([]);
   });
 
   test('two blocks in one turn get distinct stream ids in order', () => {
@@ -199,7 +202,7 @@ describe('streamer', () => {
     s.streamer.onEvent(start());
     s.text('<message to="room">one</message> aside <message to="room">two</message>');
     s.advance(500);
-    expect(s.rows.map((r) => [r.streamId, r.text])).toEqual([
+    expect(s.rows.map((r) => [r.streamId, (r as StreamAppendRow).text])).toEqual([
       ['s-1', 'one'],
       ['s-2', 'two'],
     ]);
@@ -209,7 +212,7 @@ describe('streamer', () => {
     const s = setup();
     s.streamer.onEvent(start());
     s.text('<message to="room">quick</message>');
-    expect(s.rows.map((r) => r.text)).toEqual(['quick']);
+    expect(s.rows.map((r) => (r as StreamAppendRow).text)).toEqual(['quick']);
   });
 
   test('text outside a message is never sent and a turn_end with no open turn is ignored', () => {
@@ -220,5 +223,36 @@ describe('streamer', () => {
     s.advance(1000);
     s.streamer.onEvent({ type: 'turn_end', outcome: 'done' });
     expect(s.rows).toEqual([]);
+  });
+
+  test('a closed block whose row never comes is aborted at turn_end', () => {
+    const s = setup();
+    s.streamer.onEvent(start());
+    s.text('<message to="room">dup</message>');
+    s.streamer.onEvent({ type: 'turn_end', outcome: 'done' });
+    expect(s.rows.filter((r) => r.action === 'stream_abort')).toEqual([
+      { action: 'stream_abort', streamId: 's-1', platformId: CHAT },
+    ]);
+    expect(s.streamer.decorate(rowFor('dup'))).toBeNull();
+  });
+
+  test('earlier unmatched blocks are aborted when a later one matches', () => {
+    const s = setup();
+    s.streamer.onEvent(start());
+    s.text('<message to="room">skipped</message><message to="room">kept</message>');
+    expect(s.streamer.decorate(rowFor('kept'))).toEqual({ stream: 's-2' });
+    expect(s.rows.filter((r) => r.action === 'stream_abort')).toEqual([
+      { action: 'stream_abort', streamId: 's-1', platformId: CHAT },
+    ]);
+    s.streamer.onEvent({ type: 'turn_end', outcome: 'done' });
+    expect(s.rows.filter((r) => r.action === 'stream_abort').length).toBe(1);
+  });
+
+  test('internal spans do not stream and are stripped before matching', () => {
+    const s = setup();
+    s.streamer.onEvent(start());
+    s.text('<message to="room">a<Internal>secret</Internal>b</message>');
+    expect(s.rows.map((r) => (r as StreamAppendRow).text)).toEqual(['ab']);
+    expect(s.streamer.decorate(rowFor('a<internal note="z">q</internal>b'))).toEqual({ stream: 's-1' });
   });
 });

@@ -23,10 +23,16 @@ export interface StreamAppendRow {
   text: string;
 }
 
+export interface StreamAbortRow {
+  action: 'stream_abort';
+  streamId: string;
+  platformId: string;
+}
+
 export interface StreamerDeps {
   now(): number;
   setTimer(fn: () => void, ms: number): () => void;
-  send(row: StreamAppendRow): void;
+  send(row: StreamAppendRow | StreamAbortRow): void;
   enabled(): boolean;
   newId(): string;
   resolve(to: string): { platformId: string; channelType: string } | null;
@@ -37,6 +43,8 @@ const BATCH_MS = 500;
 interface Block {
   id: string;
   pending: string;
+  /** All visible text of the block, used to match its chat row. */
+  full: string;
   sentRows: number;
   cancelTimer: (() => void) | null;
 }
@@ -95,7 +103,7 @@ export function createStreamer(deps: StreamerDeps): {
 } {
   let active = false;
   let turn: Turn | null = null;
-  const finished = new Map<string, (string | null)[]>();
+  const finished = new Map<string, { id: string; text: string }[]>();
 
   function flush(t: Turn): void {
     const b = t.block;
@@ -116,16 +124,24 @@ export function createStreamer(deps: StreamerDeps): {
     });
   }
 
-  function queueFinished(platformId: string, id: string | null): void {
-    const q = finished.get(platformId) ?? [];
-    q.push(id);
-    finished.set(platformId, q);
+  function norm(text: string): string {
+    return text.replace(/<internal\b[\s\S]*?<\/internal>/gi, '').trim();
+  }
+
+  function abort(platformId: string, id: string): void {
+    deps.send({ action: 'stream_abort', streamId: id, platformId });
+  }
+
+  function abortAllFinished(): void {
+    for (const [platformId, q] of finished) for (const f of q) abort(platformId, f.id);
+    finished.clear();
   }
 
   function handleText(t: Turn, text: string): void {
     const b = t.block;
     if (!b || t.skipping) return;
     b.pending += text;
+    b.full += text;
     if (!b.cancelTimer) {
       b.cancelTimer = deps.setTimer(() => {
         b.cancelTimer = null;
@@ -140,7 +156,7 @@ export function createStreamer(deps: StreamerDeps): {
         if (active) return;
         active = true;
         turn = null;
-        finished.clear();
+        abortAllFinished();
         const r = e.routing;
         if (!deps.enabled()) return;
         if (r.taskRun || r.channelType !== 'slack' || !r.platformId || !r.threadId) return;
@@ -164,7 +180,7 @@ export function createStreamer(deps: StreamerDeps): {
             const dest = deps.resolve(op.to);
             if (dest && dest.channelType === 'slack' && dest.platformId === t.platformId) {
               t.skipping = false;
-              t.block = { id: deps.newId(), pending: '', sentRows: 0, cancelTimer: null };
+              t.block = { id: deps.newId(), pending: '', full: '', sentRows: 0, cancelTimer: null };
             } else {
               t.skipping = true;
               t.block = null;
@@ -174,7 +190,11 @@ export function createStreamer(deps: StreamerDeps): {
           } else {
             if (t.block) {
               flush(t);
-              queueFinished(t.platformId, t.block.sentRows > 0 ? t.block.id : null);
+              if (t.block.sentRows > 0) {
+                const q = finished.get(t.platformId) ?? [];
+                q.push({ id: t.block.id, text: norm(t.block.full) });
+                finished.set(t.platformId, q);
+              }
             }
             t.block = null;
             t.skipping = false;
@@ -187,7 +207,11 @@ export function createStreamer(deps: StreamerDeps): {
         active = false;
         const t = turn;
         turn = null;
-        if (t) flush(t);
+        if (t) {
+          flush(t);
+          if (t.block && t.block.sentRows > 0) abort(t.platformId, t.block.id);
+        }
+        abortAllFinished();
         return;
       }
       default:
@@ -198,8 +222,12 @@ export function createStreamer(deps: StreamerDeps): {
   function decorate(row: ChatRowInfo): Record<string, unknown> | null {
     const q = finished.get(row.platformId);
     if (!q || q.length === 0) return null;
-    const id = q.shift() ?? null;
-    return id ? { stream: id } : null;
+    const body = norm(row.body);
+    const at = q.findIndex((f) => f.text === body);
+    if (at === -1) return null;
+    for (const skipped of q.slice(0, at)) abort(row.platformId, skipped.id);
+    const [match] = q.splice(0, at + 1).slice(-1);
+    return { stream: match.id };
   }
 
   return { onEvent, decorate };

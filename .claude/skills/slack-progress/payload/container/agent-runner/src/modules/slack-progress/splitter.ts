@@ -12,8 +12,9 @@ type Mode = 'outside' | 'message' | 'internal';
 
 const OPEN_RE = /^<message\s+to="([^"]*)"\s*>/;
 const CLOSE_RE = /^<\/message\s*>/;
-const INT_OPEN_RE = /^<internal\s*>/;
-const INT_CLOSE_RE = /^<\/internal\s*>/;
+// Same rule as the poll loop's internal-span strip: any case, attributes allowed.
+const INT_OPEN_RE = /^<internal\b[^>]*>/i;
+const INT_CLOSE_RE = /^<\/internal>/i;
 const MAX_TAG = 300;
 
 type Tag =
@@ -46,13 +47,16 @@ function couldBecomeTag(rest: string, mode: Mode): boolean {
   if (rest.length >= MAX_TAG) return false;
   const names =
     mode === 'outside' ? ['<message', '<internal'] : mode === 'message' ? ['</message', '<internal'] : ['</internal'];
+  const lower = rest.toLowerCase();
   for (const n of names) {
-    if (n.startsWith(rest)) return true;
-    if (rest.startsWith(n) && !rest.includes('>')) {
+    if (n.startsWith(lower)) return true;
+    if (lower.startsWith(n) && !rest.includes('>')) {
       const tail = rest.slice(n.length);
       if (n === '<message') {
         if (/^\s+[^>]*$/.test(tail)) return true;
-      } else if (/^\s*$/.test(tail)) {
+      } else if (n === '<internal') {
+        if (!/^\w/.test(tail)) return true;
+      } else if (tail === '') {
         return true;
       }
     }

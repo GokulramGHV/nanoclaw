@@ -52,6 +52,24 @@ describe('splitter', () => {
     ]);
   });
 
+  test('uppercase and attribute internal spans are dropped like <internal>', () => {
+    for (const span of ['<Internal>x</Internal>', '<internal note="y">x</internal>', '<INTERNAL\nk="v">x</INTERNAL>']) {
+      expectAll(`<message to="m">a${span}b</message>`, [
+        { type: 'open', to: 'm' },
+        { type: 'text', text: 'ab' },
+        { type: 'close' },
+      ]);
+    }
+  });
+
+  test('a look-alike tag name is kept as text', () => {
+    expectAll('<message to="m"><internalx>t</message>', [
+      { type: 'open', to: 'm' },
+      { type: 'text', text: '<internalx>t' },
+      { type: 'close' },
+    ]);
+  });
+
   test('a < b inside a message is kept as text', () => {
     expectAll('<message to="x">a < b</message>', [
       { type: 'open', to: 'x' },
