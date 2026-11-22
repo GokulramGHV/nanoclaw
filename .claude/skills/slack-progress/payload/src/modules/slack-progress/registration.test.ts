@@ -11,6 +11,10 @@ vi.mock('../../delivery.js', () => ({
 vi.mock('../../db/migrations/index.js', () => ({
   registerMigration: vi.fn((m: { name: string }) => void migrations.push(m.name)),
 }));
+const wakeProviders: string[] = [];
+vi.mock('../../wake-context.js', () => ({
+  registerWakeContext: vi.fn((name: string) => void wakeProviders.push(name)),
+}));
 vi.mock('../../container-runner.js', () => ({ isContainerRunning: vi.fn() }));
 vi.mock('../../channels/slack-lib.js', () => ({ slackCall: vi.fn(), botTokenKeyForInstance: () => 'K' }));
 
@@ -21,6 +25,7 @@ describe('slack-progress index', () => {
     expect(actions).toEqual(expect.arrayContaining(['progress', 'stream_append', 'stream_abort']));
     expect(interceptors).toHaveLength(1);
     expect(migrations).toContain('module:slack-progress:create-tables');
+    expect(wakeProviders).toContain('slack-progress');
     expect(timer).toHaveBeenCalledWith(expect.any(Function), 30000);
     timer.mockRestore();
   });

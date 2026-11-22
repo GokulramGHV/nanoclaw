@@ -7,6 +7,7 @@
 import './db/migrations.js';
 import './plan.js';
 import './streams.js';
+import './wake.js';
 import { SWEEP_INTERVAL_MS, sweepOnce } from './sweep.js';
 
 setInterval(() => void sweepOnce(Date.now()), SWEEP_INTERVAL_MS).unref();

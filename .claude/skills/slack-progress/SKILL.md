@@ -12,6 +12,7 @@ This skill adds progress in chat for Slack agents.
 - **Status line.** While a turn's plan is open, the line under the thread (where Slack shows "Typing...") reads "is working: <what the agent is doing>". The host refreshes it every 8 seconds and pauses the generic typing refresher so it is not overwritten. It is cleared when the turn ends or the plan is closed. It is shown only in the session's own chat, in a thread, and never in `SLACK_A2A_ROOMS` channels.
 - **Closing summary.** When the turn ends, the plan message is redrawn as a short summary.
 - **No lost replies.** If the stream never started, or fails before any text is sent, the host declines and the normal delivery posts the full text. If a stream fails after text was already sent, the partial message stays in the thread and ends with "_Reply posted below._". The full reply then appears as a second message. The same happens when a reply contains a bare `@name` mention (the reply streams to the end, then it gets the note and the whole reply is posted normally) and when the streamed text does not match the final reply.
+- **No narration.** On each engaged message in an enabled Slack chat, the agent is told its progress is already shown live, so it should not report step progress in chat.
 - **Quiet when idle.** A host sweep closes plans and streams that have been silent for 2 minutes once the session's container is gone.
 
 Streaming is used only when all of these hold:
@@ -83,6 +84,8 @@ payload/src/modules/slack-progress/streams.test.ts -> src/modules/slack-progress
 payload/src/modules/slack-progress/streams.ts -> src/modules/slack-progress/streams.ts
 payload/src/modules/slack-progress/sweep.test.ts -> src/modules/slack-progress/sweep.test.ts
 payload/src/modules/slack-progress/sweep.ts -> src/modules/slack-progress/sweep.ts
+payload/src/modules/slack-progress/wake.test.ts -> src/modules/slack-progress/wake.test.ts
+payload/src/modules/slack-progress/wake.ts -> src/modules/slack-progress/wake.ts
 ```
 
 ### Register the host module
