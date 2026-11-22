@@ -1,13 +1,13 @@
 ---
 name: slack-progress
-description: Show live progress in Slack chats. While an agent works, the host keeps one plan message that follows the agent's todo list and tool use, and it streams the agent's text replies into the thread as they are written. Off by default for each agent group; an operator turns it on with a script. Use when people want to see what an agent is doing instead of waiting for one final reply. Requires /add-slack.
+description: Show live progress in Slack chats. While an agent works, the host keeps one plan message that follows the agent's task list and tool use, and it streams the agent's text replies into the thread as they are written. Off by default for each agent group; an operator turns it on with a script. Use when people want to see what an agent is doing instead of waiting for one final reply. Requires /add-slack.
 ---
 
 # Slack progress
 
 This skill adds progress in chat for Slack agents.
 
-- **Plan message.** The container tracks the agent's work and writes progress rows. The host turns them into one plan message per turn and edits it in place. The plan follows the agent's todo list. It appears at once when the agent first writes a todo list, or after 5 seconds of work once the agent has made a tool call. A plain answer with no tools and no todo list gets no plan.
+- **Plan message.** The container tracks the agent's work and writes progress rows. The host turns them into one plan message per turn and edits it in place. The plan follows the agent's task list (TodoWrite, or TaskCreate and TaskUpdate). A turn's plan shows the steps created or updated in that turn. It appears at once when the agent first writes a task list, or after 5 seconds of work once the agent has made a tool call. A plain answer with no tools and no task list gets no plan.
 - **Streamed replies.** The agent's text is sent to Slack in batches about every half second, using Slack's streaming methods. The reply grows in the thread as it is written.
 - **Closing summary.** When the turn ends, the plan message is redrawn as a short summary.
 - **No lost replies.** If the stream never started, or fails before any text is sent, the host declines and the normal delivery posts the full text. If a stream fails after text was already sent, the partial message stays in the thread and ends with "_Reply posted below._". The full reply then appears as a second message. The same happens when a reply contains a bare `@name` mention (the reply streams to the end, then it gets the note and the whole reply is posted normally) and when the streamed text does not match the final reply.

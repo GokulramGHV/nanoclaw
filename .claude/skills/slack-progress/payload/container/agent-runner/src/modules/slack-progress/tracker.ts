@@ -1,6 +1,7 @@
 /**
  * Progress tracker. Turns progress events into throttled `progress` rows.
  *
+ * - The to-do list comes from TodoWrite or from TaskCreate and TaskUpdate calls.
  * - No row until the first to-do list arrives, or the turn has run 5000 ms and made
  *   at least one tool call. A turn with no tools and no to-dos never sends a row.
  * - At most one row per 2000 ms, always carrying the latest state.
@@ -32,6 +33,12 @@ export interface TrackerDeps {
 }
 
 const FIRST_ROW_MS = 5000;
+
+/** Task list and discovery tools. They never change the "doing" line or count as work. */
+const QUIET_TOOLS = new Set(['TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet', 'ToolSearch']);
+
+type Status = ProgressRow['todos'][number]['status'];
+type TaskStep = { title: string; status: Status };
 const MIN_GAP_MS = 2000;
 
 interface OpenTurn {
@@ -40,6 +47,8 @@ interface OpenTurn {
   threadId: string | null;
   startedAt: number;
   todos: ProgressRow['todos'];
+  /** Ids of task-list steps created or updated in this turn, in first-seen order. */
+  shown: Set<string>;
   doing: string | null;
   toolCalls: number;
   sent: boolean;
@@ -51,6 +60,55 @@ interface OpenTurn {
 
 export function createProgressTracker(deps: TrackerDeps): { onEvent(e: ProgressEvent): void } {
   let turn: OpenTurn | null = null;
+  // The agent's task list lives for the whole session, so it is kept outside the turn.
+  // Ids match the SDK's numbering: "1", "2", ... in creation order. The plan for a
+  // turn shows only the steps created or updated in that turn.
+  const tasks = new Map<string, TaskStep>();
+  let lastTaskId = 0;
+
+  function syncTodos(t: OpenTurn): void {
+    const next: ProgressRow['todos'] = [];
+    for (const id of t.shown) {
+      const step = tasks.get(id);
+      if (step) next.push({ ...step });
+    }
+    if (JSON.stringify(next) !== JSON.stringify(t.todos)) {
+      t.todos = next;
+      t.dirty = true;
+    }
+  }
+
+  function taskEvent(name: string, input: Record<string, unknown>): void {
+    if (name === 'TaskCreate') {
+      const subject = typeof input.subject === 'string' ? input.subject : '';
+      lastTaskId += 1;
+      const id = String(lastTaskId);
+      tasks.set(id, { title: subject, status: 'pending' });
+      if (turn) {
+        turn.shown.add(id);
+        syncTodos(turn);
+      }
+    } else if (name === 'TaskUpdate') {
+      const id = typeof input.taskId === 'string' ? input.taskId : String(input.taskId ?? '');
+      const step = tasks.get(id);
+      if (!step) return;
+      if (input.status === 'deleted') {
+        tasks.delete(id);
+      } else {
+        if (typeof input.subject === 'string' && input.subject) step.title = input.subject;
+        if (input.status === 'in_progress' || input.status === 'completed' || input.status === 'pending') {
+          step.status = input.status;
+        }
+      }
+      if (turn) {
+        turn.shown.add(id);
+        syncTodos(turn);
+      }
+    } else {
+      return;
+    }
+    if (turn) flush(turn);
+  }
 
   function row(t: OpenTurn, outcome: ProgressRow['outcome']): ProgressRow {
     return {
@@ -113,6 +171,7 @@ export function createProgressTracker(deps: TrackerDeps): { onEvent(e: ProgressE
           threadId: r.threadId,
           startedAt: deps.now(),
           todos: [],
+          shown: new Set(),
           doing: null,
           toolCalls: 0,
           sent: false,
@@ -134,6 +193,7 @@ export function createProgressTracker(deps: TrackerDeps): { onEvent(e: ProgressE
           title: typeof x?.content === 'string' ? x.content : '',
           status: x?.status === 'in_progress' || x?.status === 'completed' ? x.status : ('pending' as const),
         }));
+        turn.shown.clear();
         if (JSON.stringify(next) !== JSON.stringify(turn.todos)) {
           turn.todos = next;
           turn.dirty = true;
@@ -142,7 +202,9 @@ export function createProgressTracker(deps: TrackerDeps): { onEvent(e: ProgressE
         return;
       }
       case 'tool': {
+        taskEvent(e.name, e.input);
         if (!turn) return;
+        if (QUIET_TOOLS.has(e.name)) return;
         turn.toolCalls += 1;
         const doing = describeTool(e.name, e.input);
         if (doing !== turn.doing) {

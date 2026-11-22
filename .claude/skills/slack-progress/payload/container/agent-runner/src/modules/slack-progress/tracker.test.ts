@@ -217,4 +217,85 @@ describe('progress tracker', () => {
       { title: '', status: 'pending' },
     ]);
   });
+
+  describe('task tools', () => {
+    const create = (subject: string): ProgressEvent => ({ type: 'tool', name: 'TaskCreate', input: { subject } });
+    const update = (taskId: string, status: string, extra: Record<string, unknown> = {}): ProgressEvent => ({
+      type: 'tool',
+      name: 'TaskUpdate',
+      input: { taskId, status, ...extra },
+    });
+
+    test('TaskCreate and TaskUpdate build steps and show the plan at once', () => {
+      const { tracker, rows } = setup();
+      tracker.onEvent(start());
+      tracker.onEvent(create('a'));
+      expect(rows).toHaveLength(1);
+      tracker.onEvent(create('b'));
+      tracker.onEvent(create('c'));
+      tracker.onEvent(update('1', 'in_progress'));
+      tracker.onEvent(update('1', 'completed'));
+      tracker.onEvent(update('2', 'in_progress'));
+      tracker.onEvent({ type: 'turn_end', outcome: 'done' });
+      expect(rows[rows.length - 1]!.todos).toEqual([
+        { title: 'a', status: 'completed' },
+        { title: 'b', status: 'in_progress' },
+        { title: 'c', status: 'pending' },
+      ]);
+      expect(rows[rows.length - 1]!.doing).toBeNull();
+    });
+
+    test('deleted removes a step and a subject change renames it', () => {
+      const { tracker, rows } = setup();
+      tracker.onEvent(start());
+      tracker.onEvent(create('a'));
+      tracker.onEvent(create('b'));
+      tracker.onEvent(update('1', 'deleted'));
+      tracker.onEvent(update('2', 'in_progress', { subject: 'b2' }));
+      tracker.onEvent({ type: 'turn_end', outcome: 'done' });
+      expect(rows[rows.length - 1]!.todos).toEqual([{ title: 'b2', status: 'in_progress' }]);
+    });
+
+    test('steps from an earlier turn appear when updated later', () => {
+      const { tracker, rows } = setup();
+      tracker.onEvent(start());
+      tracker.onEvent(create('a'));
+      tracker.onEvent(create('b'));
+      tracker.onEvent({ type: 'turn_end', outcome: 'done' });
+      tracker.onEvent(start());
+      tracker.onEvent(update('2', 'completed'));
+      tracker.onEvent({ type: 'turn_end', outcome: 'done' });
+      expect(rows[rows.length - 1]!.todos).toEqual([{ title: 'b', status: 'completed' }]);
+    });
+
+    test('a Bash call then TaskUpdate keeps the Bash description', () => {
+      const { tracker, rows, advance } = setup();
+      tracker.onEvent(start());
+      tracker.onEvent({ type: 'tool', name: 'Bash', input: { description: 'List files' } });
+      tracker.onEvent(update('9', 'completed'));
+      tracker.onEvent({ type: 'tool', name: 'TaskList', input: {} });
+      advance(5000);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.doing).toBe('List files');
+    });
+
+    test('ToolSearch alone does not open the plan', () => {
+      const { tracker, rows, advance } = setup();
+      tracker.onEvent(start());
+      tracker.onEvent(tool('ToolSearch'));
+      advance(6000);
+      expect(rows).toHaveLength(0);
+    });
+
+    test('TodoWrite still works', () => {
+      const { tracker, rows } = setup();
+      tracker.onEvent(start());
+      tracker.onEvent(todos('completed', 'in_progress'));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.todos).toEqual([
+        { title: 'step 0', status: 'completed' },
+        { title: 'step 1', status: 'in_progress' },
+      ]);
+    });
+  });
 });
