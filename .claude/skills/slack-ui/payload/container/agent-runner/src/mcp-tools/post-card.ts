@@ -50,7 +50,11 @@ export const postCard: McpToolDefinition = {
       type: 'object' as const,
       properties: {
         template: { type: 'string', description: 'Card template name (a file in cards/, without .json).' },
-        data: { type: 'object', description: "The template's data fields. Defaults to {}." },
+        data: {
+          type: 'object',
+          description:
+            "The template's data fields, exactly as its `data` section declares them (read /workspace/agent/plugins/<plugin>/cards/<template>.json). Defaults to {}.",
+        },
       },
       required: ['template'],
     },
