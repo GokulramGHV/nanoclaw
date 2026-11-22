@@ -113,19 +113,21 @@ describe('progress action', () => {
     expect(call).toHaveBeenCalledTimes(1);
   });
 
-  it('a timer draw that fires while the summary is in flight cannot overwrite it or reopen the row', async () => {
+  it('a timer draw in flight when the summary arrives cannot overwrite it or reopen the row', async () => {
     await handleProgress(content(), session);
     call.mockClear();
     await handleProgress(content({ doing: 'B' }), session); // schedules a timer
     let release!: () => void;
     call.mockImplementationOnce(() => new Promise((res) => (release = () => res({ ok: true, ts: '200.1' }))));
+    await vi.advanceTimersByTimeAsync(3000); // the timer draw fires, its send is pending
+    expect(call).toHaveBeenCalledTimes(1);
     const done = handleProgress(content({ outcome: 'done', elapsedMs: 42000 }), session);
-    await vi.advanceTimersByTimeAsync(3000); // timer would fire here
+    await vi.advanceTimersByTimeAsync(10);
     release();
     await done;
     await vi.advanceTimersByTimeAsync(3000);
-    expect(call).toHaveBeenCalledTimes(1);
-    expect((call.mock.calls[0][2] as { text: string }).text).toContain('Done in 42s');
+    const last = call.mock.calls[call.mock.calls.length - 1];
+    expect((last[2] as { text: string }).text).toContain('Done in 42s');
     expect(plans.get('turn1').closed).toBe(true);
   });
 
