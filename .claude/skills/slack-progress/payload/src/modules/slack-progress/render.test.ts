@@ -81,6 +81,14 @@ describe('renderSummary', () => {
     expect(text.split('\n')[0]).toBe('Done in 42s, 3 steps');
   });
 
+  it('done with no todos has no placeholder card, error keeps one marked error', () => {
+    const done = renderSummary(row({ outcome: 'done' }));
+    expect(done.text).toBe('Done in 42s');
+    expect(done.blocks).toEqual([]);
+    const failed = renderSummary(row({ outcome: 'error' }));
+    expect(planOf(failed.blocks).tasks.map((t) => t.status)).toEqual(['error']);
+  });
+
   it('error outcome gives "Stopped after 42s" and marks the in-progress card error', () => {
     const { text, blocks } = renderSummary(row({ todos: three, outcome: 'error' }));
     expect(text.split('\n')[0]).toBe('Stopped after 42s');

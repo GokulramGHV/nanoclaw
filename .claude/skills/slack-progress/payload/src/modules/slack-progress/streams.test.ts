@@ -50,7 +50,8 @@ const msg = (over: Record<string, unknown> = {}) =>
     threadId: 'slack:C1:100.1',
     ...over,
   }) as any;
-const methods = () => call.mock.calls.map((c) => c[1]);
+const streamCalls = () => vi.mocked(slackCall).mock.calls.filter((c) => c[1] !== 'assistant.threads.setStatus');
+const methods = () => streamCalls().map((c) => c[1]);
 
 function seedStream(over: Record<string, unknown> = {}) {
   streams.set('st1', {
@@ -101,7 +102,7 @@ describe('registration', () => {
 describe('stream_append', () => {
   it('first append calls chat.startStream with channel, thread_ts, recipient_user_id, recipient_team_id and stores stream_ts', async () => {
     await handleStreamAppend(append(), session);
-    const start = call.mock.calls.find((c) => c[1] === 'chat.startStream')!;
+    const start = streamCalls().find((c) => c[1] === 'chat.startStream')!;
     expect(start[0]).toBe('xoxb-test');
     expect(start[2]).toMatchObject({
       channel: 'C1',
@@ -177,7 +178,7 @@ describe('stream_append', () => {
 
   it('pieces are sent unchanged, even with mentions', async () => {
     await handleStreamAppend(append({ text: 'hi @alex and <@U2>' }), session);
-    const start = call.mock.calls.find((c) => c[1] === 'chat.startStream')!;
+    const start = streamCalls().find((c) => c[1] === 'chat.startStream')!;
     expect((start[2] as any).markdown_text).toBe('hi @alex and <@U2>');
   });
 });
@@ -249,7 +250,7 @@ describe('interceptor', () => {
     seedStream();
     const id = await interceptStreamedReply(msg(), session, { text: 'Hello world', stream: 'st1' });
     expect(id).toBe('300.1');
-    expect(call.mock.calls.map((c) => [c[1], (c[2] as any).markdown_text])).toEqual([
+    expect(streamCalls().map((c) => [c[1], (c[2] as any).markdown_text])).toEqual([
       ['chat.appendStream', ' world'],
       ['chat.stopStream', undefined],
     ]);
@@ -271,8 +272,8 @@ describe('interceptor', () => {
   it('failed stream with a shown part ends it with a note and returns null', async () => {
     seedStream({ status: 'failed' });
     expect(await interceptStreamedReply(msg(), session, { text: 'Hello', stream: 'st1' })).toBeNull();
-    expect(call.mock.calls[0][1]).toBe('chat.stopStream');
-    expect((call.mock.calls[0][2] as any).markdown_text).toMatch(/reply posted below/i);
+    expect(streamCalls()[0][1]).toBe('chat.stopStream');
+    expect((streamCalls()[0][2] as any).markdown_text).toMatch(/reply posted below/i);
   });
 
   it('unknown stream id returns null', async () => {
@@ -284,8 +285,39 @@ describe('interceptor', () => {
     seedStream({ sentText: 'Hello' });
     expect(await interceptStreamedReply(msg(), session, { text: 'Goodbye', stream: 'st1' })).toBeNull();
     expect(methods()).toEqual(['chat.stopStream']);
-    expect((call.mock.calls[0][2] as any).markdown_text).toMatch(/reply posted below/i);
+    expect((streamCalls()[0][2] as any).markdown_text).toMatch(/reply posted below/i);
     expect(streams.get('st1').status).toBe('failed');
+  });
+
+  it('stop clears the typing status after chat.stopStream and still returns the stream ts', async () => {
+    seedStream();
+    expect(await interceptStreamedReply(msg(), session, { text: 'Hello', stream: 'st1' })).toBe('300.1');
+    const all = vi.mocked(slackCall).mock.calls.map((c) => c[1]);
+    expect(all).toEqual(['chat.stopStream', 'assistant.threads.setStatus']);
+    expect(vi.mocked(slackCall).mock.calls[1][2]).toEqual({ channel_id: 'C1', thread_ts: '100.1', status: '' });
+  });
+
+  it('a failing typing clear still returns the stream ts', async () => {
+    seedStream();
+    call.mockImplementation(async (_t, method) => {
+      if (method === 'assistant.threads.setStatus') throw new Error('nope');
+      return { ok: true };
+    });
+    expect(await interceptStreamedReply(msg(), session, { text: 'Hello', stream: 'st1' })).toBe('300.1');
+    expect(streams.get('st1').status).toBe('stopped');
+  });
+
+  it('stream_abort and the note path also clear the typing status', async () => {
+    seedStream();
+    await handleStreamAbort({ action: 'stream_abort', streamId: 'st1', platformId: 'slack:C1' }, session);
+    expect(vi.mocked(slackCall).mock.calls.map((c) => c[1])).toContain('assistant.threads.setStatus');
+    vi.clearAllMocks();
+    seedStream({ status: 'failed' });
+    await interceptStreamedReply(msg(), session, { text: 'Hello', stream: 'st1' });
+    expect(vi.mocked(slackCall).mock.calls.map((c) => c[1])).toEqual([
+      'chat.stopStream',
+      'assistant.threads.setStatus',
+    ]);
   });
 
   it('stopStream failure returns null', async () => {
@@ -347,7 +379,7 @@ describe('interceptor whitespace and mentions', () => {
   it('leading newline in streamed text still matches the trimmed final text', async () => {
     seedStream({ sentText: '\nHello' });
     expect(await interceptStreamedReply(msg(), session, { text: 'Hello world', stream: 'st1' })).toBe('300.1');
-    expect(call.mock.calls.map((c) => [c[1], (c[2] as any).markdown_text])).toEqual([
+    expect(streamCalls().map((c) => [c[1], (c[2] as any).markdown_text])).toEqual([
       ['chat.appendStream', ' world'],
       ['chat.stopStream', undefined],
     ]);
@@ -357,14 +389,14 @@ describe('interceptor whitespace and mentions', () => {
     seedStream({ sentText: '\nHello\n' });
     expect(await interceptStreamedReply(msg(), session, { text: 'Hello', stream: 'st1' })).toBe('300.1');
     expect(methods()).toEqual(['chat.stopStream']);
-    expect((call.mock.calls[0][2] as any).markdown_text).toBeUndefined();
+    expect((streamCalls()[0][2] as any).markdown_text).toBeUndefined();
   });
 
   it('bare @name in the final text declines with the note', async () => {
     seedStream();
     expect(await interceptStreamedReply(msg(), session, { text: 'Hello @alex', stream: 'st1' })).toBeNull();
     expect(methods()).toEqual(['chat.stopStream']);
-    expect((call.mock.calls[0][2] as any).markdown_text).toMatch(/reply posted below/i);
+    expect((streamCalls()[0][2] as any).markdown_text).toMatch(/reply posted below/i);
   });
 
   it('tokenised <@U123> mention streams normally', async () => {
@@ -379,7 +411,7 @@ describe('stream_abort', () => {
     seedStream();
     await handleStreamAbort({ action: 'stream_abort', streamId: 'st1', platformId: 'slack:C1' }, session);
     expect(methods()).toEqual(['chat.stopStream', 'chat.delete']);
-    expect(call.mock.calls[1][2]).toMatchObject({ channel: 'C1', ts: '300.1' });
+    expect(streamCalls()[1][2]).toMatchObject({ channel: 'C1', ts: '300.1' });
     expect(streams.get('st1').status).toBe('stopped');
   });
 

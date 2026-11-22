@@ -26,6 +26,23 @@ function call(token: string, method: string, body: Record<string, unknown>): Pro
   return withRateLimitRetry(() => slackCall(token, method, body, 'stream'));
 }
 
+/**
+ * Clear the assistant "Typing..." status after a stream ends. A normal post clears it in
+ * Slack, a stream does not. Best effort: not awaited, errors are logged and ignored.
+ */
+function clearTypingStatus(row: StreamRow, token: string): void {
+  if (!row.threadTs) return;
+  const channel_id = row.channelId;
+  const thread_ts = row.threadTs;
+  void (async () => {
+    try {
+      await slackCall(token, 'assistant.threads.setStatus', { channel_id, thread_ts, status: '' }, 'stream');
+    } catch (err) {
+      log.warn('slack-progress: could not clear typing status', { streamId: row.streamId, err: String(err) });
+    }
+  })();
+}
+
 const chains = new Map<string, Promise<unknown>>();
 const teamCache = new Map<string, string>();
 
@@ -184,6 +201,7 @@ export async function endWithNote(row: StreamRow, note: string): Promise<void> {
   if (!token || !row.streamTs) return;
   try {
     await call(token, 'chat.stopStream', { channel: row.channelId, ts: row.streamTs, markdown_text: note });
+    clearTypingStatus(row, token);
   } catch (err) {
     log.warn('slack-progress: could not end stream with note', { streamId: row.streamId, err: String(err) });
   }
@@ -201,6 +219,7 @@ async function abortWork(content: Record<string, unknown>, session: Session): Pr
   }
   try {
     await call(token, 'chat.stopStream', { channel: row.channelId, ts: row.streamTs });
+    clearTypingStatus(row, token);
     await save(row, { status: 'stopped' });
     await call(token, 'chat.delete', { channel: row.channelId, ts: row.streamTs });
   } catch (err) {
@@ -253,6 +272,7 @@ async function interceptWork(
       await call(token, 'chat.appendStream', { channel: row.channelId, ts: row.streamTs, markdown_text: rest });
     }
     await call(token, 'chat.stopStream', { channel: row.channelId, ts: row.streamTs });
+    clearTypingStatus(row, token);
   } catch (err) {
     log.warn('slack-progress: could not finish stream', { streamId, err: String(err) });
     await save(row, { status: 'failed' });

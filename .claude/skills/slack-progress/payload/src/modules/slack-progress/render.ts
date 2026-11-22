@@ -57,9 +57,10 @@ function seconds(ms: number): string {
 
 function cards(row: ProgressRow, finalOutcome: ProgressRow['outcome']): Card[] {
   if (row.todos.length === 0) {
+    // A finished turn with no todos has no steps to show, so no placeholder card.
+    if (finalOutcome === 'done') return [];
     const title = clip(row.doing ?? 'Working', TITLE_MAX) || 'Working';
-    const status: CardStatus =
-      finalOutcome === 'done' ? 'complete' : finalOutcome === 'error' ? 'error' : 'in_progress';
+    const status: CardStatus = finalOutcome === 'error' ? 'error' : 'in_progress';
     return [{ type: 'task_card', task_id: 't0', title, status }];
   }
   return row.todos.slice(0, MAX_CARDS).map((t, i): Card => {

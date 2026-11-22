@@ -100,9 +100,28 @@ describe('progress tracker', () => {
     expect(rows[1]!.doing).toBe('Searching the web');
   });
 
+  test('no tool and no todos past 5000 ms emits nothing, even at turn end', () => {
+    const { tracker, rows, advance } = setup();
+    tracker.onEvent(start());
+    advance(8000);
+    expect(rows).toHaveLength(0);
+    tracker.onEvent({ type: 'turn_end', outcome: 'done' });
+    expect(rows).toHaveLength(0);
+  });
+
+  test('a tool call made after 5000 ms emits a row at once', () => {
+    const { tracker, rows, advance } = setup();
+    tracker.onEvent(start());
+    advance(6000);
+    expect(rows).toHaveLength(0);
+    tracker.onEvent(tool('Read'));
+    expect(rows).toHaveLength(1);
+  });
+
   test('no row when nothing changed', () => {
     const { tracker, rows, advance } = setup();
     tracker.onEvent(start());
+    tracker.onEvent(tool());
     advance(5000);
     expect(rows).toHaveLength(1);
     advance(20000);

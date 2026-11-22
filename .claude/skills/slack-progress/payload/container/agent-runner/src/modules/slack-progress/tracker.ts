@@ -1,7 +1,8 @@
 /**
  * Progress tracker. Turns progress events into throttled `progress` rows.
  *
- * - No row until the turn has run 5000 ms, or the first to-do list arrives.
+ * - No row until the first to-do list arrives, or the turn has run 5000 ms and made
+ *   at least one tool call. A turn with no tools and no to-dos never sends a row.
  * - At most one row per 2000 ms, always carrying the latest state.
  * - The final row at turn end is never throttled.
  *
@@ -40,6 +41,7 @@ interface OpenTurn {
   startedAt: number;
   todos: ProgressRow['todos'];
   doing: string | null;
+  toolCalls: number;
   sent: boolean;
   dirty: boolean;
   lastSendAt: number;
@@ -73,7 +75,7 @@ export function createProgressTracker(deps: TrackerDeps): { onEvent(e: ProgressE
 
   function flush(t: OpenTurn): void {
     if (turn !== t || !deps.enabled()) return;
-    const eligible = deps.now() - t.startedAt >= FIRST_ROW_MS || t.todos.length > 0;
+    const eligible = t.todos.length > 0 || (t.toolCalls > 0 && deps.now() - t.startedAt >= FIRST_ROW_MS);
     if (!eligible) return;
     if (t.sent && !t.dirty) return;
     if (t.sent) {
@@ -112,6 +114,7 @@ export function createProgressTracker(deps: TrackerDeps): { onEvent(e: ProgressE
           startedAt: deps.now(),
           todos: [],
           doing: null,
+          toolCalls: 0,
           sent: false,
           dirty: false,
           lastSendAt: 0,
@@ -140,6 +143,7 @@ export function createProgressTracker(deps: TrackerDeps): { onEvent(e: ProgressE
       }
       case 'tool': {
         if (!turn) return;
+        turn.toolCalls += 1;
         const doing = describeTool(e.name, e.input);
         if (doing !== turn.doing) {
           turn.doing = doing;
