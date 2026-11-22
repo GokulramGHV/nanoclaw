@@ -407,6 +407,23 @@ describe('renderCard', () => {
     expect(blocks[1].elements[0].initial_options.map((o: any) => o.value)).toEqual(['b']);
   });
 
+  // Seen live: after a refused untick, the redraw with identical blocks left
+  // the presser's local tick on their screen. A fresh block_id per render makes
+  // Slack draw the stored state instead.
+  it('gives every block a fresh, unique block_id on each render, keeping a template block_id as prefix', () => {
+    const withId: CardTemplate = {
+      ...template,
+      blocks: [{ ...(template.blocks[0] as object), block_id: 'head' }, template.blocks[1]],
+    };
+    const first = renderCard(card({ template: withId })).blocks as any[];
+    const second = renderCard(card({ template: withId })).blocks as any[];
+    const ids = first.map((b) => b.block_id);
+    expect(ids.every((id) => typeof id === 'string' && id.length > 0 && id.length <= 255)).toBe(true);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(ids[0].startsWith('head.')).toBe(true);
+    expect(second.map((b) => b.block_id)).not.toEqual(ids);
+  });
+
   it('renders the locked view with lockedBy and lockedAt', () => {
     const { blocks } = renderCard(card({ locked: true, lockedBy: 'U2', lockedAt: '2026-01-02T03:04:05.000Z' })) as {
       blocks: any[];

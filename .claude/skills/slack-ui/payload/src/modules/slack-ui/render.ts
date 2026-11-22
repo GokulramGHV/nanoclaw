@@ -2,6 +2,8 @@
  * Card rendering: action ids, stored state, and the locked view. Pure logic —
  * everything here returns new structures and never mutates its input.
  */
+import { randomBytes } from 'node:crypto';
+
 import type { UiCard } from './db/ui-cards.js';
 import { escapeMrkdwn, fillTemplate } from './template.js';
 
@@ -240,5 +242,19 @@ export function renderCard(card: UiCard): { text: string; blocks: unknown[] } {
       new Date(card.lockedAt ?? card.updatedAt),
     );
   }
-  return { text: filled.text, blocks };
+  return { text: filled.text, blocks: withFreshBlockIds(blocks) };
+}
+
+/**
+ * Slack keeps a person's local control state (a tick the host refused) when a
+ * redraw reuses the same block ids. A new id per render makes Slack draw the
+ * stored state. Click handling reads controls by action_id, never block_id.
+ */
+function withFreshBlockIds(blocks: unknown[]): unknown[] {
+  const rev = randomBytes(4).toString('hex');
+  return blocks.map((b, i) => {
+    if (!isObj(b)) return b;
+    const own = typeof b.block_id === 'string' && b.block_id !== '' ? b.block_id.slice(0, 200) : `b${i}`;
+    return { ...b, block_id: `${own}.${i}.${rev}` };
+  });
 }
