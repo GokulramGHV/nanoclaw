@@ -49,7 +49,11 @@ function send(sessionId: string, target: StatusTarget, status: string): void {
       slackCall(
         target.token,
         'assistant.threads.setStatus',
-        { channel_id: target.channel, thread_ts: target.threadTs, status },
+        // Slack keeps rotating earlier loading messages over the status text,
+        // so send the text as the only loading message too. Clearing sends none.
+        status
+          ? { channel_id: target.channel, thread_ts: target.threadTs, status, loading_messages: [status] }
+          : { channel_id: target.channel, thread_ts: target.threadTs, status },
         'status',
       ),
     )

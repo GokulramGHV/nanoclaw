@@ -175,7 +175,9 @@ async function process_(row: ProgressRow, content: Record<string, unknown>, sess
   if (plan?.closed) return;
   // The status line follows the plan's own gates. It needs a thread, and it never delays the plan.
   if (threadTs) {
-    if (row.outcome === 'working') setWorkingStatus(session.id, row.turnId, { token, channel, threadTs }, row.doing);
+    // Prefer the step in progress from the agent's own task list; fall back to the tool description.
+    const label = row.todos.find((t) => t.status === 'in_progress')?.title ?? row.doing;
+    if (row.outcome === 'working') setWorkingStatus(session.id, row.turnId, { token, channel, threadTs }, label);
     else clearWorkingStatus(session.id, row.turnId);
   }
 

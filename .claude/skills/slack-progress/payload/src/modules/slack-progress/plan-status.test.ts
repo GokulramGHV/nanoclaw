@@ -44,7 +44,7 @@ const content = (over: Record<string, unknown> = {}) => ({
   turnId: 'turn1',
   platformId: 'slack:C1',
   threadId: 'slack:C1:100.1',
-  todos: [{ title: 'Step', status: 'in_progress' }],
+  todos: [{ title: 'Step', status: 'pending' }],
   doing: 'Reading files',
   startedAt: '2026-01-01T00:00:00.000Z',
   elapsedMs: 1000,
@@ -73,6 +73,11 @@ afterEach(() => {
 });
 
 describe('status line from progress rows', () => {
+  it('shows the step in progress from the task list, before the tool description', async () => {
+    await handleProgress(content({ todos: [{ title: 'Count lines', status: 'in_progress' }] }), session);
+    expect(statuses()).toEqual(['is working: Count lines']);
+  });
+
   it('a working row sets the status and pauses typing', async () => {
     await handleProgress(content(), session);
     expect(statuses()).toEqual(['is working: Reading files']);

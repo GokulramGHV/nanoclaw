@@ -32,7 +32,12 @@ describe('working status', () => {
     expect(call).toHaveBeenCalledWith(
       'xoxb-test',
       'assistant.threads.setStatus',
-      { channel_id: 'C1', thread_ts: '100.1', status: 'is working: Reading files' },
+      {
+        channel_id: 'C1',
+        thread_ts: '100.1',
+        status: 'is working: Reading files',
+        loading_messages: ['is working: Reading files'],
+      },
       'status',
     );
     expect(pause).toHaveBeenCalledWith('s1');
