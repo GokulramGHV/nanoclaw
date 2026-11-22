@@ -1,0 +1,246 @@
+/**
+ * `progress` delivery action: keep one plan message per turn in the session's
+ * own Slack thread. The first row posts it, later rows edit it at most once per
+ * 2000 ms (latest state wins), and a done or error row draws the summary at once
+ * and closes the plan. The handler never throws to delivery.
+ */
+import { botTokenKeyForInstance, slackCall } from '../../channels/slack-lib.js';
+import { registerDeliveryAction } from '../../delivery.js';
+import { getMessagingGroup } from '../../db/messaging-groups.js';
+import { envValue } from '../../env.js';
+import { unguarded } from '../../guard/types.js';
+import { log } from '../../log.js';
+import type { Session } from '../../types.js';
+import { closePlan, getPlan, upsertPlan, type PlanRow } from './db/progress.js';
+import { renderPlan, renderSummary, type ProgressRow } from './render.js';
+import { isEnabled } from './settings.js';
+
+export const EDIT_INTERVAL_MS = 2000;
+
+interface Live {
+  token: string;
+  channel: string;
+  latest: ProgressRow;
+  lastDrawMs: number;
+  timer: ReturnType<typeof setTimeout> | null;
+  closed: boolean;
+}
+
+const live = new Map<string, Live>();
+const chains = new Map<string, Promise<void>>();
+/** Slack answers invalid_blocks to the undocumented 'pending' status: remember it for this process. */
+let pendingOk = true;
+
+/** Test hook: forget all in-memory state. */
+export function resetPlanState(): void {
+  for (const l of live.values()) if (l.timer) clearTimeout(l.timer);
+  live.clear();
+  chains.clear();
+  pendingOk = true;
+}
+
+/** `slack:<channel>:<ts>` -> ts, only when the channel matches. */
+function threadTsFor(threadId: unknown, channel: string): string | null {
+  if (typeof threadId !== 'string') return null;
+  const parts = threadId.split(':');
+  if (parts.length !== 3 || parts[0] !== 'slack' || parts[1] !== channel || parts[2] === '') return null;
+  return parts[2];
+}
+
+function stripSlack(id: string): string {
+  return id.startsWith('slack:') ? id.slice('slack:'.length) : id;
+}
+
+/** Check the shape defensively; bad rows come back null. */
+export function parseProgressRow(content: Record<string, unknown>): ProgressRow | null {
+  const { turnId, todos, outcome } = content;
+  if (typeof turnId !== 'string' || turnId === '') return null;
+  if (outcome !== 'working' && outcome !== 'done' && outcome !== 'error') return null;
+  if (!Array.isArray(todos)) return null;
+  const clean: ProgressRow['todos'] = [];
+  for (const t of todos) {
+    const o = t as { title?: unknown; status?: unknown };
+    if (typeof o?.title !== 'string') return null;
+    if (o.status !== 'pending' && o.status !== 'in_progress' && o.status !== 'completed') return null;
+    clean.push({ title: o.title, status: o.status });
+  }
+  const elapsed = Number(content.elapsedMs);
+  return {
+    action: 'progress',
+    turnId,
+    platformId: typeof content.platformId === 'string' ? content.platformId : '',
+    threadId: typeof content.threadId === 'string' ? content.threadId : null,
+    todos: clean,
+    doing: typeof content.doing === 'string' ? content.doing : null,
+    startedAt: typeof content.startedAt === 'string' ? content.startedAt : new Date().toISOString(),
+    elapsedMs: Number.isFinite(elapsed) ? elapsed : 0,
+    outcome,
+  };
+}
+
+function isInvalidBlocks(err: unknown): boolean {
+  return err instanceof Error && err.name === 'SlackApiError' && err.message.includes('invalid_blocks');
+}
+
+/** Send one post or update; on invalid_blocks for a pending card, retry once without pending. */
+async function send(
+  method: 'chat.postMessage' | 'chat.update',
+  token: string,
+  base: Record<string, unknown>,
+  row: ProgressRow,
+): Promise<Record<string, unknown>> {
+  const build = () => {
+    const r = row.outcome === 'working' ? renderPlan(row, { pendingOk }) : renderSummary(row);
+    return { ...base, text: r.text, blocks: r.blocks };
+  };
+  try {
+    return await slackCall(token, method, build(), 'progress');
+  } catch (err) {
+    if (pendingOk && isInvalidBlocks(err) && row.todos.some((t) => t.status === 'pending')) {
+      pendingOk = false;
+      return await slackCall(token, method, build(), 'progress');
+    }
+    throw err;
+  }
+}
+
+async function persist(turnId: string, entry: Live, messageTs: string, row: ProgressRow, closed: boolean) {
+  const plan = await getPlan(turnId);
+  if (!plan) return;
+  const next: PlanRow = {
+    ...plan,
+    messageTs,
+    stateJson: JSON.stringify(row),
+    lastDrawnAt: new Date(entry.lastDrawMs).toISOString(),
+    updatedAt: new Date().toISOString(),
+    closed,
+  };
+  await upsertPlan(next);
+}
+
+async function draw(turnId: string, ts: string): Promise<void> {
+  const entry = live.get(turnId);
+  if (!entry || entry.closed) return;
+  entry.timer = null;
+  const row = entry.latest;
+  entry.lastDrawMs = Date.now();
+  try {
+    await send('chat.update', entry.token, { channel: entry.channel, ts }, row);
+    await persist(turnId, entry, ts, row, false);
+  } catch (err) {
+    log.warn('slack-progress: plan update failed', { turnId, err: String(err) });
+  }
+}
+
+async function finish(turnId: string, ts: string, row: ProgressRow): Promise<void> {
+  const entry = live.get(turnId);
+  if (!entry) return;
+  if (entry.timer) clearTimeout(entry.timer);
+  entry.timer = null;
+  entry.closed = true;
+  entry.latest = row;
+  try {
+    await send('chat.update', entry.token, { channel: entry.channel, ts }, row);
+  } catch (err) {
+    log.warn('slack-progress: summary update failed', { turnId, err: String(err) });
+  }
+  await closePlan(turnId).catch(() => {});
+  live.delete(turnId);
+}
+
+async function process_(row: ProgressRow, content: Record<string, unknown>, session: Session): Promise<void> {
+  if (!(await isEnabled(session.agent_group_id))) return;
+  if (!session.messaging_group_id) return;
+  const mg = await getMessagingGroup(session.messaging_group_id);
+  if (!mg || mg.channel_type !== 'slack') return;
+  const channel = stripSlack(mg.platform_id);
+  const instance = mg.instance ?? mg.channel_type;
+  const token = envValue(botTokenKeyForInstance(instance));
+  if (!token) return;
+  const threadTs = threadTsFor(content.threadId, channel) ?? threadTsFor(session.thread_id, channel);
+
+  const plan = await getPlan(row.turnId);
+  if (plan?.closed) return;
+
+  if (!plan || !plan.messageTs) {
+    const now = new Date().toISOString();
+    const base: PlanRow = plan ?? {
+      turnId: row.turnId,
+      sessionId: session.id,
+      agentGroupId: session.agent_group_id,
+      instance,
+      channelId: channel,
+      threadTs,
+      messageTs: null,
+      stateJson: JSON.stringify(row),
+      lastDrawnAt: null,
+      updatedAt: now,
+      closed: false,
+      createdAt: now,
+    };
+    await upsertPlan(base);
+    const res = await send('chat.postMessage', token, { channel, ...(threadTs ? { thread_ts: threadTs } : {}) }, row);
+    if (typeof res.ts !== 'string') throw new Error('Slack did not return a message timestamp');
+    const entry: Live = { token, channel, latest: row, lastDrawMs: Date.now(), timer: null, closed: false };
+    live.set(row.turnId, entry);
+    const finished = row.outcome !== 'working';
+    await upsertPlan({
+      ...base,
+      messageTs: res.ts,
+      stateJson: JSON.stringify(row),
+      lastDrawnAt: new Date().toISOString(),
+      closed: finished,
+    });
+    if (finished) live.delete(row.turnId);
+    return;
+  }
+
+  const ts = plan.messageTs;
+  let entry = live.get(row.turnId);
+  if (!entry) {
+    const last = plan.lastDrawnAt ? Date.parse(plan.lastDrawnAt) : 0;
+    entry = {
+      token,
+      channel: plan.channelId,
+      latest: row,
+      lastDrawMs: Number.isFinite(last) ? last : 0,
+      timer: null,
+      closed: false,
+    };
+    live.set(row.turnId, entry);
+  }
+  entry.latest = row;
+  if (row.outcome !== 'working') {
+    await finish(row.turnId, ts, row);
+    return;
+  }
+  if (entry.timer) return; // the pending draw will use the latest state
+  const wait = entry.lastDrawMs + EDIT_INTERVAL_MS - Date.now();
+  if (wait <= 0) {
+    await draw(row.turnId, ts);
+  } else {
+    entry.timer = setTimeout(() => void draw(row.turnId, ts), wait);
+  }
+}
+
+export async function handleProgress(content: Record<string, unknown>, session: Session): Promise<void> {
+  const row = parseProgressRow(content);
+  if (!row) {
+    log.warn('slack-progress: dropped malformed progress row');
+    return;
+  }
+  // Rows for one turn run one after another so the first post cannot race a later edit.
+  const prev = chains.get(row.turnId) ?? Promise.resolve();
+  const run = prev.then(async () => {
+    try {
+      await process_(row, content, session);
+    } catch (err) {
+      log.warn('slack-progress: progress action failed', { turnId: row.turnId, err: String(err) });
+    }
+  });
+  chains.set(row.turnId, run);
+  await run;
+  if (chains.get(row.turnId) === run) chains.delete(row.turnId);
+}
+
+registerDeliveryAction('progress', handleProgress, unguarded("posts only into the session's own chat"));
