@@ -192,7 +192,7 @@ export async function handleStreamAppend(content: Record<string, unknown>, sessi
 }
 
 /** End a stream with a short note, ignoring Slack errors. Used when a reply is posted instead. */
-async function endWithNote(row: StreamRow, note: string): Promise<void> {
+export async function endWithNote(row: StreamRow, note: string): Promise<void> {
   const token = envValue(botTokenKeyForInstance(row.instance));
   if (!token || !row.streamTs) return;
   try {
