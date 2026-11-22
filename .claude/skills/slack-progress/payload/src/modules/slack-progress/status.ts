@@ -49,29 +49,30 @@ export function resetStatusState(): void {
 
 /**
  * Light-hearted lines Slack rotates through while the agent works, so the status
- * never reads as a flat "is working". Slack puts the app name in front of each.
+ * never reads as a flat "is working". Slack shows these as written, with no app name
+ * in front, so they carry no "is".
  */
 export const PLAYFUL_LINES = [
-  'is noodling on it...',
-  'is pondering...',
-  'is mulling it over...',
-  'is cooking something up...',
-  'is crunching...',
-  'is tinkering...',
-  'is untangling things...',
-  'is connecting the dots...',
-  'is brewing...',
-  'is sharpening pencils...',
-  'is rummaging around...',
-  'is piecing it together...',
-  'is chasing a hunch...',
-  'is herding bits...',
-  'is shuffling papers...',
-  'is in the zone...',
-  'is turning it over...',
-  'is wrangling details...',
-  'is consulting the notes...',
-  'is lining things up...',
+  'noodling on it...',
+  'pondering...',
+  'mulling it over...',
+  'cooking something up...',
+  'crunching...',
+  'tinkering...',
+  'untangling things...',
+  'connecting the dots...',
+  'brewing...',
+  'sharpening pencils...',
+  'rummaging around...',
+  'piecing it together...',
+  'chasing a hunch...',
+  'herding bits...',
+  'shuffling papers...',
+  'in the zone...',
+  'turning it over...',
+  'wrangling details...',
+  'consulting the notes...',
+  'lining things up...',
 ];
 
 /** Pick `n` different playful lines. `rand` is injectable for tests. */
@@ -82,9 +83,10 @@ export function pickPlayful(n: number, rand: () => number = Math.random): string
   return out;
 }
 
-/** The lines to rotate: the real step first when known, then a few playful ones. Slack allows 10. */
+/** The lines to rotate: the bare step first when known, then a few playful ones. Slack allows 10. */
 export function loadingLines(status: string, hasLabel: boolean, playful: string[]): string[] {
-  return hasLabel ? [status, ...playful.slice(0, 3)] : playful.slice(0, 5);
+  const step = status.replace(/^is working: /, '');
+  return hasLabel ? [step, ...playful.slice(0, 3)] : playful.slice(0, 5);
 }
 
 export function statusText(doing: string | null): string {

@@ -49,7 +49,7 @@ describe('working status', () => {
         channel_id: 'C1',
         thread_ts: '100.1',
         status: 'is working: Reading files',
-        loading_messages: expect.arrayContaining(['is working: Reading files']),
+        loading_messages: expect.arrayContaining(['Reading files']),
       },
       'status',
     );
@@ -58,7 +58,7 @@ describe('working status', () => {
 
   it('rotates the real step first, then playful lines', () => {
     expect(loadingLines('is working: Count lines', true, ['a', 'b', 'c', 'd'])).toEqual([
-      'is working: Count lines',
+      'Count lines',
       'a',
       'b',
       'c',
@@ -70,7 +70,7 @@ describe('working status', () => {
     const picks = pickPlayful(5, () => 0);
     expect(new Set(picks).size).toBe(5);
     for (const p of picks) expect(PLAYFUL_LINES).toContain(p);
-    expect(PLAYFUL_LINES.every((l) => l.length <= 50 && !l.includes('\u2014'))).toBe(true);
+    expect(PLAYFUL_LINES.every((l) => l.length <= 50 && !l.includes('\u2014') && !l.startsWith('is '))).toBe(true);
   });
 
   it('uses a bare "is working" when doing is empty and trims long text', () => {
@@ -149,7 +149,7 @@ describe('wake status', () => {
     setWorkingStatus('s1', 'turn1', target, 'Count lines');
     await vi.advanceTimersByTimeAsync(0);
     expect(statuses()).toEqual(['is working', 'is working: Count lines']);
-    expect(lines()[1]).toEqual(['is working: Count lines', ...first.slice(0, 3)]);
+    expect(lines()[1]).toEqual(['Count lines', ...first.slice(0, 3)]);
   });
 
   it('does not replace a status a turn already owns', async () => {
