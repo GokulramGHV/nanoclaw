@@ -127,15 +127,21 @@ export function createProgressTracker(deps: TrackerDeps): { onEvent(e: ProgressE
       }
       case 'todos': {
         if (!turn) return;
-        turn.todos = e.todos.map((x) => ({ title: x.content, status: x.status }));
-        turn.dirty = true;
+        const next = e.todos.map((x) => ({ title: x.content, status: x.status }));
+        if (JSON.stringify(next) !== JSON.stringify(turn.todos)) {
+          turn.todos = next;
+          turn.dirty = true;
+        }
         flush(turn);
         return;
       }
       case 'tool': {
         if (!turn) return;
-        turn.doing = describeTool(e.name, e.input);
-        turn.dirty = true;
+        const doing = describeTool(e.name, e.input);
+        if (doing !== turn.doing) {
+          turn.doing = doing;
+          turn.dirty = true;
+        }
         flush(turn);
         return;
       }

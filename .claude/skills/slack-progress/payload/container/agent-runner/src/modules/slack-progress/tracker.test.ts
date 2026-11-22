@@ -145,6 +145,21 @@ describe('progress tracker', () => {
     expect(rows[0]!.turnId).toBe('turn-1');
   });
 
+  test('repeated identical tools and to-do lists send no extra row', () => {
+    const { tracker, rows, advance } = setup();
+    tracker.onEvent(start());
+    tracker.onEvent(todos('in_progress'));
+    tracker.onEvent(tool('Read'));
+    advance(2000);
+    expect(rows).toHaveLength(2);
+    for (let i = 0; i < 5; i++) {
+      tracker.onEvent(tool('Read'));
+      tracker.onEvent(todos('in_progress'));
+      advance(2000);
+    }
+    expect(rows).toHaveLength(2);
+  });
+
   test('turn_end with no open turn is ignored', () => {
     const { tracker, rows } = setup();
     tracker.onEvent({ type: 'turn_end', outcome: 'error' });
