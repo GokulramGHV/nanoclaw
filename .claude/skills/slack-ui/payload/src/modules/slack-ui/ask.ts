@@ -215,18 +215,25 @@ async function writeAskRow(
   if (wake) await requestWake((await getSession(session.id)) ?? session, 'interactive');
 }
 
-/** Close the session's older open questions about the same message. A failure is logged and never blocks. */
-async function closeOlderAsks(client: ReturnType<typeof slackClientForToken>, sessionId: string, inReplyTo: string) {
+/** The session's open questions about the same message, read before the new card exists. Never throws. */
+async function findOlderAsks(sessionId: string, inReplyTo: string | undefined): Promise<CardRecord[]> {
+  if (!inReplyTo) return [];
   try {
-    for (const old of await listOpenAskCards(sessionId, inReplyTo)) {
-      try {
-        await kit.closeCard(client, old.channel, old.ts, { note: 'Replaced by a newer question.' });
-      } catch (err) {
-        log.warn('slack-ui: could not close an older ask card', { ts: old.ts, err: String(err) });
-      }
-    }
+    return await listOpenAskCards(sessionId, inReplyTo);
   } catch (err) {
     log.warn('slack-ui: could not look up older ask cards', { err: String(err) });
+    return [];
+  }
+}
+
+/** Close those older questions once the new card is up. A failure is logged and never blocks. */
+async function closeAsks(client: ReturnType<typeof slackClientForToken>, older: CardRecord[]) {
+  for (const old of older) {
+    try {
+      await kit.closeCard(client, old.channel, old.ts, { note: 'Replaced by a newer question.' });
+    } catch (err) {
+      log.warn('slack-ui: could not close an older ask card', { ts: old.ts, err: String(err) });
+    }
   }
 }
 
@@ -262,7 +269,7 @@ async function ask(content: Obj, session: Session): Promise<void> {
   }
   const client = slackClientForToken(token);
   const inReplyTo = typeof content.inReplyTo === 'string' && content.inReplyTo ? content.inReplyTo : undefined;
-  if (inReplyTo) await closeOlderAsks(client, session.id, inReplyTo);
+  const older = await findOlderAsks(session.id, inReplyTo);
   await kit.postCard(client, { channel, ...(threadTs ? { threadTs } : {}) }, source, {
     owner,
     access: askAccess(spec.who, owner),
@@ -281,6 +288,7 @@ async function ask(content: Obj, session: Session): Promise<void> {
       questions: spec.questions.map((q) => ({ question: q.question, options: q.options.map((o) => o.label) })),
     },
   });
+  await closeAsks(client, older);
 }
 
 export async function handleAsk(content: Obj, session: Session): Promise<void> {

@@ -51,19 +51,19 @@ beforeEach(() => {
 });
 
 describe('writeCardEvent', () => {
-  it('decodes entities in state, value, labels and stateLabels, and leaves plain text alone', async () => {
+  it('decodes entities in state and value only; labels and stateLabels are already plain from the kit', async () => {
     await writeCardEvent(
       event({
-        control: { id: 'go', kind: 'button', value: { $note: 'a &amp; b' }, labels: { $pick: ['Fish &amp; Chips'] } },
+        control: { id: 'go', kind: 'button', value: { $note: 'a &amp; b' }, labels: { $pick: ['Fish &lt; Chips'] } },
         state: { $pick: ['x'], $note: '&lt;hi&gt; &amp;amp; plain', $list: [{ t: 'R&amp;D' }], $n: 3 },
-        stateLabels: { $pick: ['Fish &amp; Chips'], $one: 'A &amp; B' },
+        stateLabels: { $pick: ['Fish & Chips'], $one: 'A &lt; B' },
       }),
     );
     const p = JSON.parse(write.mock.calls[0]![2].content).payload;
     expect(p.value).toEqual({ note: 'a & b' });
-    expect(p.labels).toEqual({ pick: ['Fish & Chips'] });
+    expect(p.labels).toEqual({ pick: ['Fish &lt; Chips'] });
     expect(p.state).toEqual({ pick: ['x'], note: '<hi> &amp; plain', list: [{ t: 'R&D' }], n: 3 });
-    expect(p.stateLabels).toEqual({ pick: ['Fish & Chips'], one: 'A & B' });
+    expect(p.stateLabels).toEqual({ pick: ['Fish & Chips'], one: 'A &lt; B' });
   });
 
   it('leaves typed text without entities unchanged', async () => {

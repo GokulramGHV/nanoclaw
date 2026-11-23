@@ -370,6 +370,14 @@ describe('closing an older ask', () => {
     expect(await closedAt('q-c')).toBeDefined();
   });
 
+  it('leaves the old ask open when the new post fails', async () => {
+    await handleAsk(content({ questionId: 'q-1' }), session);
+    fake.postError = new Error('slack down');
+    await handleAsk(content({ questionId: 'q-2' }), session);
+    expect(await closedAt('q-1')).toBeUndefined();
+    expect(updates()).toHaveLength(0);
+  });
+
   it('still posts the new card when closing fails', async () => {
     await handleAsk(content({ questionId: 'q-1' }), session);
     fake.updateError = new Error('slack down');

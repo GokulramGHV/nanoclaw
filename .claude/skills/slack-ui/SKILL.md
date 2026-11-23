@@ -122,7 +122,7 @@ import './ask.js';
 
 An install made from the earlier step-1 version of this skill has files this version no longer ships. Left in place they are dead code and may fail the build or the tests. This deletes them if they are there; on a fresh install it does nothing:
 
-```nc:run
+```nc:run effect:refresh
 rm -f src/modules/slack-ui/render.ts src/modules/slack-ui/rules.ts src/modules/slack-ui/db/ui-cards.ts src/modules/slack-ui/render.test.ts src/modules/slack-ui/rules.test.ts src/modules/slack-ui/db/ui-cards.test.ts
 ```
 
