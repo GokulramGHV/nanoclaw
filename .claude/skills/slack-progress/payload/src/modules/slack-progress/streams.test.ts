@@ -250,7 +250,7 @@ describe('rate limits', () => {
     const ts = await interceptStreamedReply(msg(), session, { stream: 'st1', text: 'Hello world' });
     expect(ts).toBeNull();
     expect(methods()).toEqual(['chat.stopStream', 'chat.delete', 'chat.update']);
-    expect(streamCalls()[2]![2]).toMatchObject({ markdown_text: '_Reply posted below._' });
+    expect(streamCalls()[2]![2]).toMatchObject({ text: '_Reply posted below._' });
     expect(streams.get('st1').status).toBe('stopped');
   });
 
@@ -290,31 +290,45 @@ describe('rate limits', () => {
     expect(streams.get('st1').status).toBe('stopped');
   });
 
-  it('a rate-limited stop after a successful tail append is not treated as held', async () => {
+  it('a rate-limited final stop (no tail append): the message is deleted without another stop, and the reply is declined once', async () => {
     seedStream();
     call.mockImplementation(async (_t, method) => {
       if (method === 'chat.stopStream') throw limited(method);
       return { ok: true };
     });
-    expect(await interceptStreamedReply(msg(), session, { stream: 'st1', text: 'Hello world' })).toBeNull();
-    expect(methods()).not.toContain('chat.delete');
-    expect(streams.get('st1').held).toBe(false);
+    expect(await interceptStreamedReply(msg(), session, { stream: 'st1', text: 'Hello' })).toBeNull();
+    expect(methods()).toEqual(['chat.stopStream', 'chat.stopStream', 'chat.stopStream', 'chat.delete']);
+    expect(streams.get('st1').status).toBe('stopped');
+    call.mockClear();
+    expect(await interceptStreamedReply(msg(), session, { stream: 'st1', text: 'Hello' })).toBeNull();
+    expect(call).not.toHaveBeenCalled();
   });
 
-  it('a rate-limited stop is still retried', async () => {
+  it('a rate-limited final stop and a failed delete: the message is edited to the note, still declined once', async () => {
     seedStream();
+    call.mockImplementation(async (_t, method) => {
+      if (method === 'chat.stopStream') throw limited(method);
+      if (method === 'chat.delete') throw new Error('slack chat.delete failed: boom');
+      return { ok: true };
+    });
+    expect(await interceptStreamedReply(msg(), session, { stream: 'st1', text: 'Hello' })).toBeNull();
+    expect(methods().slice(-2)).toEqual(['chat.delete', 'chat.update']);
+    expect(streamCalls().at(-1)![2]).toMatchObject({ text: '_Reply posted below._' });
+    expect(streams.get('st1').status).toBe('stopped');
+  });
+
+  it('held cleanup retries a rate-limited delete', async () => {
+    seedStream({ status: 'failed', held: true });
     let first = true;
     call.mockImplementation(async (_t, method) => {
-      if (method === 'chat.stopStream' && first) {
+      if (method === 'chat.delete' && first) {
         first = false;
         throw limited(method);
       }
       return { ok: true };
     });
-    const ts = await interceptStreamedReply(msg(), session, { stream: 'st1', text: 'Hello world' });
-    expect(ts).toBe('300.1');
-    expect(methods()).toEqual(['chat.appendStream', 'chat.stopStream', 'chat.stopStream']);
-    expect(streams.get('st1').status).toBe('stopped');
+    await interceptStreamedReply(msg(), session, { stream: 'st1', text: 'Hello world' });
+    expect(methods()).toEqual(['chat.stopStream', 'chat.delete', 'chat.delete']);
   });
 
   it('a non-rate-limit append error still marks the stream failed', async () => {

@@ -226,9 +226,9 @@ export async function endWithNote(row: StreamRow, note: string): Promise<void> {
  * bridge posts next appears once. If the stream cannot be removed, end it with the note.
  * The row is marked stopped at the end, so nothing handles the stream twice.
  */
-export async function discardHeld(row: StreamRow): Promise<void> {
+export async function discardHeld(row: StreamRow, opts: { stopFailed?: boolean } = {}): Promise<void> {
   try {
-    await removeHeld(row);
+    await removeHeld(row, opts.stopFailed === true);
   } finally {
     await save(row, { status: 'stopped', held: false }).catch((err) => {
       log.warn('slack-progress: could not record discarded stream', { streamId: row.streamId, err: String(err) });
@@ -236,23 +236,26 @@ export async function discardHeld(row: StreamRow): Promise<void> {
   }
 }
 
-async function removeHeld(row: StreamRow): Promise<void> {
+async function removeHeld(row: StreamRow, stopFailed: boolean): Promise<void> {
   const token = envValue(botTokenKeyForInstance(row.instance));
   if (!token || !row.streamTs) return;
-  try {
-    await call(token, 'chat.stopStream', { channel: row.channelId, ts: row.streamTs });
-  } catch (err) {
-    log.warn('slack-progress: could not stop held stream', { streamId: row.streamId, err: String(err) });
-    await endWithNote(row, NOTE_BELOW);
-    return;
+  // When the reply's own final stop was what hit the limit, stopping again is not worth another round.
+  if (!stopFailed) {
+    try {
+      await call(token, 'chat.stopStream', { channel: row.channelId, ts: row.streamTs });
+    } catch (err) {
+      log.warn('slack-progress: could not stop held stream', { streamId: row.streamId, err: String(err) });
+      await endWithNote(row, NOTE_BELOW);
+      return;
+    }
   }
   clearTypingStatus(row, token);
   try {
-    await callOnce(token, 'chat.delete', { channel: row.channelId, ts: row.streamTs });
+    await call(token, 'chat.delete', { channel: row.channelId, ts: row.streamTs });
   } catch (err) {
     log.warn('slack-progress: could not delete held stream, marking it', { streamId: row.streamId, err: String(err) });
     try {
-      await callOnce(token, 'chat.update', { channel: row.channelId, ts: row.streamTs, markdown_text: NOTE_BELOW });
+      await call(token, 'chat.update', { channel: row.channelId, ts: row.streamTs, text: NOTE_BELOW });
     } catch (err2) {
       log.warn('slack-progress: could not mark held stream', { streamId: row.streamId, err: String(err2) });
     }
@@ -325,21 +328,20 @@ async function interceptWork(
   }
   const tail = finalText.slice(shown.length);
   const rest = tail.trim() === '' ? '' : tail;
-  let appendFailed = false;
+  let stage: 'append' | 'stop' = 'append';
   try {
     if (rest !== '') {
-      appendFailed = true;
       await callOnce(token, 'chat.appendStream', { channel: row.channelId, ts: row.streamTs, markdown_text: rest });
-      appendFailed = false;
     }
+    stage = 'stop';
     await call(token, 'chat.stopStream', { channel: row.channelId, ts: row.streamTs });
     clearTypingStatus(row, token);
   } catch (err) {
     log.warn('slack-progress: could not finish stream', { streamId, err: String(err) });
-    // Held only when the tail append itself was rate limited; a limited stop keeps the full text shown.
-    const held = appendFailed && isRateLimited(err);
+    // A rate-limited append or final stop holds the stream: its message is removed and the reply is posted once.
+    const held = isRateLimited(err);
     await save(row, { status: 'failed', held });
-    if (held) await discardHeld(row);
+    if (held) await discardHeld(row, { stopFailed: stage === 'stop' });
     else await endWithNote(row, NOTE_BELOW);
     return null;
   }
