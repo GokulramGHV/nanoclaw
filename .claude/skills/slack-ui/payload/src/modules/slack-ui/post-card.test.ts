@@ -56,6 +56,7 @@ import type { Session } from '../../types.js';
 import { getCardById } from './db/kit-cards.js';
 import './index.js';
 import { notifyCardFailure } from './notify.js';
+import { kit } from './kit.js';
 import { handlePostCard, readInboundSender } from './post-card.js';
 
 const notify = vi.mocked(notifyCardFailure);
@@ -431,6 +432,19 @@ describe('post_card', () => {
     expect(await getCardById('card-1')).toBeUndefined();
     expect(notify.mock.calls[0]![1]).toMatch(/^post_card failed: .+/);
     expect(notify.mock.calls[0]![1]).not.toBe('post_card failed: unexpected error (see host log)');
+  });
+
+  it('a template that cannot be rendered gets its own notice, without paths or tokens', async () => {
+    vi.spyOn(kit, 'render').mockRejectedValueOnce(
+      new Error(`parse failed at ${groupDir}/plugins/x.oui with xoxb-secret-1\nstack line`),
+    );
+    await post();
+    expect(posts()).toHaveLength(0);
+    const text = notify.mock.calls[0]![1] as string;
+    expect(text).toMatch(/^post_card failed: template demo-request could not be rendered: parse failed at \[path\]/);
+    expect(text).not.toContain(groupDir);
+    expect(text).not.toContain('xoxb-secret');
+    expect(text).not.toContain('stack line');
   });
 
   it('an unexpected error is hidden behind a generic notice and never thrown', async () => {

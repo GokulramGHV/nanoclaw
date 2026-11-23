@@ -8,6 +8,7 @@ import type { Adapter, ModalResponse, ModalSubmitEvent } from 'chat';
 
 import { registerModalSubmitHandler } from '../../channels/question-render-registry.js';
 import { log } from '../../log.js';
+import { noteEventContext } from './events.js';
 import { FORM_CALLBACK_ID, kit, recoverKitError } from './kit.js';
 import { slackClientForInstance } from './slack-client.js';
 
@@ -45,6 +46,19 @@ export async function handleKitFormSubmit(
     return false;
   }
 
+  const user = isObj(raw.user) ? raw.user : {};
+  const userId = typeof user.id === 'string' ? user.id : event.user?.userId;
+  if (userId) {
+    noteEventContext(channel, ts, userId, {
+      viewId: typeof view.id === 'string' && view.id !== '' ? view.id : undefined,
+      userName:
+        typeof user.name === 'string' && user.name
+          ? user.name
+          : typeof user.username === 'string'
+            ? user.username
+            : undefined,
+    });
+  }
   const result = await kit.handleViewSubmission(client, raw);
   if (!result.handled) return false;
   void result.done.catch((err) => recoverKitError(err));

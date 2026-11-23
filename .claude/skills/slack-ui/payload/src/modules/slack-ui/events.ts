@@ -11,6 +11,45 @@ import { requestWake } from '../../request-wake.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import { kit, registerCardEventHandler } from './kit.js';
 
+/**
+ * What the raw Slack payload knows about one event and the card event does not:
+ * the press's `action_ts` or the form's view id (they make the message id unique
+ * per Slack event and stable across a redelivery) and the person's name. The
+ * click or submit handler notes it just before the kit runs; the writer takes it.
+ * Entries are removed after use or after 60 s.
+ */
+export type EventContext = { actionTs?: string; viewId?: string; userName?: string };
+
+const CONTEXT_TTL_MS = 60_000;
+const contexts = new Map<string, { ctx: EventContext; timer: ReturnType<typeof setTimeout> }>();
+
+const contextKey = (channel: string, ts: string, user: string) => `${channel}:${ts}:${user}`;
+
+export function noteEventContext(channel: string, ts: string, user: string, ctx: EventContext): void {
+  const key = contextKey(channel, ts, user);
+  const old = contexts.get(key);
+  if (old) clearTimeout(old.timer);
+  const timer = setTimeout(() => contexts.delete(key), CONTEXT_TTL_MS);
+  timer.unref?.();
+  contexts.set(key, { ctx, timer });
+}
+
+function takeContext(key: string): EventContext | undefined {
+  return contexts.get(key)?.ctx;
+}
+
+function dropContext(key: string): void {
+  const hit = contexts.get(key);
+  if (hit) clearTimeout(hit.timer);
+  contexts.delete(key);
+}
+
+/** Drop one leading `$` from each key of a plain object (state and form values); anything else passes through. */
+function stripDollar(v: unknown): unknown {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return v;
+  return Object.fromEntries(Object.entries(v).map(([k, val]) => [k.startsWith('$') ? k.slice(1) : k, val]));
+}
+
 function isDuplicate(err: unknown): boolean {
   const code = typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined;
   const msg = err instanceof Error ? err.message : String(err);
@@ -46,9 +85,16 @@ export async function writeCardEvent(event: CardEvent, stored?: CardRecord): Pro
 
   const channel = event.card.channel;
   const threadTs = event.card.threadTs;
+  const key = contextKey(channel, event.card.ts, event.user);
+  const ctx = takeContext(key);
+  const id = ctx?.actionTs
+    ? `card-${cardId}-${ctx.actionTs}`
+    : ctx?.viewId
+      ? `card-${cardId}-${ctx.viewId}-sub`
+      : `card-${cardId}-v${card.version}-${Math.random().toString(36).slice(2, 8)}`;
   try {
     await writeSessionMessage(agentGroupId, sessionId, {
-      id: `card-${cardId}-v${card.version}`,
+      id,
       kind: 'webhook',
       timestamp: new Date().toISOString(),
       platformId: `slack:${channel}`,
@@ -61,9 +107,9 @@ export async function writeCardEvent(event: CardEvent, stored?: CardRecord): Pro
           cardId,
           template: str(event.meta?.template) ?? '',
           control: event.control.id,
-          value: event.control.value ?? null,
-          user: { id: event.user, name: '' },
-          state: event.state,
+          value: stripDollar(event.control.value ?? null),
+          user: { id: event.user, name: ctx?.userName ?? '' },
+          state: stripDollar(event.state),
           locked: event.locked !== undefined,
         },
       }),
@@ -71,10 +117,12 @@ export async function writeCardEvent(event: CardEvent, stored?: CardRecord): Pro
   } catch (err) {
     if (isDuplicate(err)) {
       log.debug('slack-ui: duplicate card event ignored', { cardId });
+      dropContext(key);
       return;
     }
     throw err;
   }
+  dropContext(key);
   const fresh = (await getSession(sessionId)) ?? session;
   await requestWake(fresh, 'interactive');
 }

@@ -7,7 +7,7 @@
  */
 import type { SlackClient } from 'slack-ui-kit';
 
-import { botTokenKeyForInstance, slackCall } from '../../channels/slack-lib.js';
+import { botTokenKeyForInstance, SlackApiError, slackCall } from '../../channels/slack-lib.js';
 import { envValue } from '../../env.js';
 
 /** `slack <method> failed: <code>` -> `<code>`. */
@@ -28,6 +28,40 @@ async function call(token: string, method: string, args: unknown, step: string):
   }
 }
 
+/**
+ * `usergroups.users.list` rejects a JSON body with `invalid_arguments` (seen
+ * live), so this one call sends form-encoded arguments instead of going
+ * through `slackCall`. Failures carry Slack's code at `data.error`.
+ */
+async function listGroupUsers(token: string, usergroup: string): Promise<{ users?: string[] }> {
+  const fail = (code: string): never => {
+    throw Object.assign(new SlackApiError('slack-ui-usergroup', `slack usergroups.users.list failed: ${code}`), {
+      data: { error: code },
+    });
+  };
+  let res: Response;
+  try {
+    res = await fetch('https://slack.com/api/usergroups.users.list', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ usergroup }).toString(),
+      signal: AbortSignal.timeout(10_000),
+    });
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : String(err));
+  }
+  let body: { ok?: unknown; error?: unknown; users?: unknown };
+  try {
+    body = (await res.json()) as typeof body;
+  } catch {
+    return fail(`HTTP ${res.status}, non-JSON body`);
+  }
+  if (body.ok !== true) return fail(String(body.error ?? `HTTP ${res.status}`));
+  return {
+    users: Array.isArray(body.users) ? body.users.filter((u): u is string => typeof u === 'string') : undefined,
+  };
+}
+
 function build(token: string): SlackClient {
   return {
     chat: {
@@ -38,7 +72,7 @@ function build(token: string): SlackClient {
     },
     views: { open: (args) => call(token, 'views.open', args, 'slack-ui-views-open') },
     usergroups: {
-      users: { list: (args) => call(token, 'usergroups.users.list', args, 'slack-ui-usergroup') },
+      users: { list: (args) => listGroupUsers(token, args.usergroup) },
     },
   };
 }

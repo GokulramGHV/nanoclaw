@@ -24,8 +24,6 @@ export interface CardTemplate {
   version: 2;
   /** Template name (set by parseTemplate). */
   name: string;
-  /** Optional plain fallback text. The kit derives notification text from the card itself. */
-  text?: string;
   data: Record<string, FieldSpec>;
   access?: Access;
   /** File name of the OpenUI Lang source, beside the JSON file. */
@@ -172,7 +170,6 @@ export function parseTemplate(json: string, name: string): CardTemplate {
 
   const problems: string[] = [];
   if (raw.version !== 2) problems.push('version must be 2');
-  if (raw.text !== undefined && typeof raw.text !== 'string') problems.push('text must be a string');
   checkFieldSpecs(raw.data ?? {}, 'data', problems);
   if (raw.access !== undefined) checkAccess(raw.access, problems);
   if (typeof raw.openui !== 'string' || !OPENUI_FILE_RE.test(raw.openui)) {
@@ -183,11 +180,20 @@ export function parseTemplate(json: string, name: string): CardTemplate {
   return {
     version: 2,
     name,
-    ...(typeof raw.text === 'string' ? { text: raw.text } : {}),
     data: (raw.data ?? {}) as Record<string, FieldSpec>,
     ...(raw.access !== undefined ? { access: raw.access as Access } : {}),
     openui: raw.openui as string,
   };
+}
+
+/** A symlink could point a template at a host file; refuse it. A missing file passes through to the read. */
+async function refuseSymlink(file: string, what: string): Promise<void> {
+  try {
+    if ((await fs.lstat(file)).isSymbolicLink()) throw new TemplateError([`${what} must not be a symlink`]);
+  } catch (err) {
+    if (err instanceof TemplateError) throw err;
+    // ENOENT and others: the read that follows reports them.
+  }
 }
 
 export async function findTemplate(groupDir: string, name: string): Promise<{ template: CardTemplate; path: string }> {
@@ -206,8 +212,10 @@ export async function findTemplate(groupDir: string, name: string): Promise<{ te
   for (const plugin of plugins) {
     const file = path.join(pluginsDir, plugin, 'cards', `${name}.json`);
     try {
+      await refuseSymlink(file, `card template "${name}" in plugin "${plugin}"`);
       found.push({ plugin, path: file, json: await fs.readFile(file, 'utf8') });
     } catch (err) {
+      if (err instanceof TemplateError) throw err;
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'ENOENT' || code === 'ENOTDIR') continue;
       throw new TemplateError([`cannot read card template "${name}" in plugin "${plugin}" (${code ?? 'error'})`], {
@@ -238,8 +246,10 @@ export async function findTemplate(groupDir: string, name: string): Promise<{ te
   }
   const sourceFile = path.join(path.dirname(hit.path), template.openui);
   try {
+    await refuseSymlink(sourceFile, `${template.openui} of card template "${name}"`);
     template.source = await fs.readFile(sourceFile, 'utf8');
   } catch (err) {
+    if (err instanceof TemplateError) throw err;
     const code = (err as NodeJS.ErrnoException).code;
     throw new TemplateError([`cannot read ${template.openui} for card template "${name}" (${code ?? 'error'})`], {
       cause: err,

@@ -9,6 +9,7 @@ import type { ActionEvent, Adapter } from 'chat';
 
 import { registerQuestionActionHandler } from '../../channels/question-render-registry.js';
 import { log } from '../../log.js';
+import { noteEventContext } from './events.js';
 import { kit, recoverKitError } from './kit.js';
 import { slackClientForInstance } from './slack-client.js';
 
@@ -55,6 +56,20 @@ async function tellNoLongerActive(event: ActionEvent, instance: string): Promise
   }
 }
 
+/** Hand the press's action_ts and the clicker's name to the card_event writer. */
+function noteClick(event: ActionEvent, at: { channel: string; ts: string }): void {
+  const raw = isObj(event.raw) ? event.raw : {};
+  const actions = Array.isArray(raw.actions) ? raw.actions : [];
+  const hit = actions.find((a) => isObj(a) && a.action_id === event.actionId) ?? actions[0];
+  const user = isObj(raw.user) ? raw.user : {};
+  const userId = str(user.id) ?? event.user?.userId;
+  if (!userId) return;
+  noteEventContext(at.channel, at.ts, userId, {
+    actionTs: isObj(hit) ? str(hit.action_ts) : undefined,
+    userName: str(user.name) ?? str(user.username),
+  });
+}
+
 export async function handleKitAction(event: ActionEvent, _adapter: Adapter, instance: string): Promise<boolean> {
   try {
     if (event.actionId.startsWith('ncu:')) {
@@ -72,6 +87,7 @@ export async function handleKitAction(event: ActionEvent, _adapter: Adapter, ins
       log.error('slack-ui: no bot token for instance', { instance });
       return true;
     }
+    noteClick(event, at);
     try {
       await kit.handleAction(client, event.raw);
     } catch (err) {

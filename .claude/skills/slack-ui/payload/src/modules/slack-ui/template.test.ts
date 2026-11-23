@@ -90,22 +90,21 @@ describe('validateData', () => {
 });
 
 describe('parseTemplate', () => {
-  const good = { version: 2, text: 't', data: {}, openui: 'x.oui', access: { buttons: 'anyone' } };
+  const good = { version: 2, data: {}, openui: 'x.oui', access: { buttons: 'anyone' } };
 
   it('parses a good template and records the name', () => {
     const p = parseTemplate(JSON.stringify(good), 'demo-request');
     expect(p).toMatchObject({
       version: 2,
       name: 'demo-request',
-      text: 't',
       openui: 'x.oui',
       access: { buttons: 'anyone' },
     });
   });
 
-  it('allows text and access to be left out', () => {
-    const p = parseTemplate(JSON.stringify({ version: 2, openui: 'x.oui' }), 'x');
-    expect(p.text).toBeUndefined();
+  it('ignores a leftover text field and allows access to be left out', () => {
+    const p = parseTemplate(JSON.stringify({ version: 2, openui: 'x.oui', text: 'old' }), 'x');
+    expect(p).not.toHaveProperty('text');
     expect(p.access).toBeUndefined();
     expect(p.data).toEqual({});
   });
@@ -121,7 +120,6 @@ describe('parseTemplate', () => {
     expect(() => parseTemplate('nope', 'x')).toThrow(TemplateError);
     expect(() => parseTemplate('[]', 'x')).toThrow(/JSON object/);
     expect(() => parseTemplate(JSON.stringify({ ...good, version: 3 }), 'x')).toThrow(/version must be 2/);
-    expect(() => parseTemplate(JSON.stringify({ ...good, text: 5 }), 'x')).toThrow(/text must be a string/);
     expect(() => parseTemplate(JSON.stringify({ ...good, data: { a: { type: 'date' } } }), 'x')).toThrow(/type/);
   });
 
@@ -252,6 +250,29 @@ describe('findTemplate', () => {
       'plugins/p/secret.oui': 'root = Root([])',
     });
     await expect(findTemplate(dir, 'x')).rejects.toThrow(/openui must be the plain file name/);
+  });
+
+  it('refuses a .oui file that is a symlink, with a plain error', async () => {
+    const dir = group({
+      'plugins/p/cards/ln.json': JSON.stringify({ version: 2, openui: 'ln.oui' }),
+      'elsewhere.txt': 'root = Root([])',
+    });
+    fs.symlinkSync(path.join(dir, 'elsewhere.txt'), path.join(dir, 'plugins/p/cards/ln.oui'));
+    const err = await findTemplate(dir, 'ln').catch((e) => e);
+    expect(err).toBeInstanceOf(TemplateError);
+    expect(err.message).toBe('ln.oui of card template "ln" must not be a symlink');
+    expect(err.message).not.toContain(dir);
+  });
+
+  it('refuses a template .json that is a symlink', async () => {
+    const dir = group({
+      'real.json': JSON.stringify({ version: 2, openui: 'sl.oui' }),
+      'plugins/p/cards/sl.oui': 'root = Root([])',
+    });
+    fs.symlinkSync(path.join(dir, 'real.json'), path.join(dir, 'plugins/p/cards/sl.json'));
+    const err = await findTemplate(dir, 'sl').catch((e) => e);
+    expect(err).toBeInstanceOf(TemplateError);
+    expect(err.message).toBe('card template "sl" in plugin "p" must not be a symlink');
   });
 
   it('wraps read and parse failures in TemplateError without absolute paths', async () => {

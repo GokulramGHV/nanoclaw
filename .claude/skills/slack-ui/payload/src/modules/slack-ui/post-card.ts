@@ -163,6 +163,15 @@ function senderFor(db: Database.Database, messageId: string, hops: number): stri
   return null;
 }
 
+/** First line of an error, without file paths or anything token-shaped, capped for the notice. */
+function shortMessage(err: unknown): string {
+  const first = (err instanceof Error ? err.message : String(err)).split('\n')[0] ?? '';
+  return first
+    .replace(/xox[a-z]-[\w-]+/gi, '[redacted]')
+    .replace(/(?:[A-Za-z]:)?[\\/][\w.\\/-]*[\\/][\w.\\/-]+/g, '[path]')
+    .slice(0, 200);
+}
+
 async function postCard(content: Record<string, unknown>, session: Session): Promise<void> {
   const { cardId, template: templateName } = content;
   if (typeof cardId !== 'string' || !CARD_ID_RE.test(cardId)) throw new PostCardError('invalid cardId');
@@ -200,12 +209,18 @@ async function postCard(content: Record<string, unknown>, session: Session): Pro
   }
 
   const owner = readInboundSender(session, content.inReplyTo) ?? '';
+  const state = escapeEntities(data);
+  try {
+    await kit.render(template.source, state);
+  } catch (err) {
+    throw new PostCardError(`template ${templateName} could not be rendered: ${shortMessage(err)}`);
+  }
   await kit.postCard(slackClientForToken(token), { channel, ...(threadTs ? { threadTs } : {}) }, template.source, {
     owner,
     access: template.access,
     trusted: true,
     placeholder: false,
-    state: escapeEntities(data),
+    state,
     meta: {
       kind: 'card',
       cardId,

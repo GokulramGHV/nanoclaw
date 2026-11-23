@@ -10,7 +10,7 @@ import { getSession } from '../../db/sessions.js';
 import { log } from '../../log.js';
 import { requestWake } from '../../request-wake.js';
 import { writeSessionMessage } from '../../session-manager.js';
-import { writeCardEvent } from './events.js';
+import { noteEventContext, writeCardEvent } from './events.js';
 import { kit, recoverKitError, routeCardEvent } from './kit.js';
 
 const write = vi.mocked(writeSessionMessage);
@@ -57,8 +57,8 @@ describe('writeCardEvent', () => {
     const [group, sess, msg] = write.mock.calls[0]!;
     expect(group).toBe('ag-1');
     expect(sess).toBe('s-1');
+    expect(msg.id).toMatch(/^card-card-1-v3-[a-z0-9]+$/);
     expect(msg).toMatchObject({
-      id: 'card-card-1-v3',
       kind: 'webhook',
       platformId: 'slack:C1',
       channelType: 'slack',
@@ -73,11 +73,39 @@ describe('writeCardEvent', () => {
         control: 'go',
         value: 'create',
         user: { id: 'U2', name: '' },
-        state: { $pick: ['a'], $choice: 'create' },
+        state: { pick: ['a'], choice: 'create' },
         locked: true,
       },
     });
     expect(requestWake).toHaveBeenCalledWith({ id: 's-1' }, 'interactive');
+  });
+
+  it('uses the press action_ts and the clicker name when the click handler noted them', async () => {
+    noteEventContext('C1', '1.1', 'U2', { actionTs: '1700.5', userName: 'ada' });
+    await writeCardEvent(event());
+    const [, , msg] = write.mock.calls[0]!;
+    expect(msg.id).toBe('card-card-1-1700.5');
+    expect(JSON.parse(msg.content).payload.user).toEqual({ id: 'U2', name: 'ada' });
+  });
+
+  it('uses the view id for a form submit, and strips $ from the submitted values', async () => {
+    noteEventContext('C1', '1.1', 'U2', { viewId: 'V99' });
+    await writeCardEvent(
+      event({ type: 'submit', control: { id: 'form:note', kind: 'form', value: { $comment: 'hi' } } }),
+    );
+    const [, , msg] = write.mock.calls[0]!;
+    expect(msg.id).toBe('card-card-1-V99-sub');
+    expect(JSON.parse(msg.content).payload.value).toEqual({ comment: 'hi' });
+  });
+
+  it('keeps the noted context for a retry after a failed write, and drops it after success', async () => {
+    noteEventContext('C1', '1.1', 'U2', { actionTs: '7.7' });
+    write.mockRejectedValueOnce(new Error('disk full'));
+    await expect(writeCardEvent(event())).rejects.toThrow();
+    await writeCardEvent(event());
+    expect(write.mock.calls[1]![2].id).toBe('card-card-1-7.7');
+    await writeCardEvent(event());
+    expect(write.mock.calls[2]![2].id).toMatch(/^card-card-1-v3-/);
   });
 
   it('marks an unlocked event, a null value and a top-level card', async () => {
@@ -91,7 +119,7 @@ describe('writeCardEvent', () => {
 
   it('uses the stored card it is given instead of reading the store', async () => {
     await writeCardEvent(event(), card({ version: 7 }));
-    expect(write.mock.calls[0]![2].id).toBe('card-card-1-v7');
+    expect(write.mock.calls[0]![2].id).toMatch(/^card-card-1-v7-/);
     expect(kit.getCard).not.toHaveBeenCalled();
   });
 
@@ -134,7 +162,7 @@ describe('card event routing and recovery', () => {
     const err = new EventDeliveryError(event(), card({ version: 5 }), new Error('disk full'));
     await recoverKitError(err);
     expect(write).toHaveBeenCalledTimes(1);
-    expect(write.mock.calls[0]![2].id).toBe('card-card-1-v5');
+    expect(write.mock.calls[0]![2].id).toMatch(/^card-card-1-v5-/);
     expect(log.error).toHaveBeenCalled();
   });
 

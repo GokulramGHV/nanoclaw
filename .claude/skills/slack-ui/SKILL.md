@@ -44,6 +44,7 @@ payload/src/modules/slack-ui/telemetry.ts -> src/modules/slack-ui/telemetry.ts
 payload/src/modules/slack-ui/kit.ts -> src/modules/slack-ui/kit.ts
 payload/src/modules/slack-ui/events.ts -> src/modules/slack-ui/events.ts
 payload/src/modules/slack-ui/events.test.ts -> src/modules/slack-ui/events.test.ts
+payload/src/modules/slack-ui/event-ids.test.ts -> src/modules/slack-ui/event-ids.test.ts
 payload/src/modules/slack-ui/slack-client.ts -> src/modules/slack-ui/slack-client.ts
 payload/src/modules/slack-ui/slack-client.test.ts -> src/modules/slack-ui/slack-client.test.ts
 payload/src/modules/slack-ui/forms.ts -> src/modules/slack-ui/forms.ts

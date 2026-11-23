@@ -1,7 +1,16 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../channels/slack-lib.js', () => ({
   slackCall: vi.fn(),
+  SlackApiError: class extends Error {
+    constructor(
+      readonly step: string,
+      message: string,
+    ) {
+      super(message);
+      this.name = 'SlackApiError';
+    }
+  },
   botTokenKeyForInstance: (i: string) => `TOKEN_${i}`,
 }));
 vi.mock('../../env.js', async (orig) => ({ ...(await orig<typeof import('../../env.js')>()), envValue: vi.fn() }));
@@ -25,14 +34,12 @@ describe('slackClientForToken', () => {
     await c.chat.delete({ channel: 'C1', ts: '1' });
     await c.chat.postEphemeral({ channel: 'C1', user: 'U1' });
     await c.views.open({ trigger_id: 't' });
-    await c.usergroups!.users.list({ usergroup: 'S1' });
     expect(call.mock.calls.map((x) => [x[0], x[1]])).toEqual([
       ['xoxb-a', 'chat.postMessage'],
       ['xoxb-a', 'chat.update'],
       ['xoxb-a', 'chat.delete'],
       ['xoxb-a', 'chat.postEphemeral'],
       ['xoxb-a', 'views.open'],
-      ['xoxb-a', 'usergroups.users.list'],
     ]);
     expect(call.mock.calls[0]![2]).toEqual({ channel: 'C1' });
   });
@@ -64,6 +71,48 @@ describe('slackClientForToken', () => {
       .views.open({})
       .catch((e) => e);
     expect(err.data).toEqual({ error: 'boom' });
+  });
+});
+
+describe('usergroups.users.list wire format', () => {
+  const fetchMock = vi.fn();
+  beforeEach(() => {
+    fetchMock.mockReset();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+  const reply = (body: unknown) => fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => body });
+
+  it('sends form-encoded arguments with the bot token, not JSON, and not through slackCall', async () => {
+    reply({ ok: true, users: ['U1', 'U2'] });
+    const res = await slackClientForToken('xoxb-a').usergroups!.users.list({ usergroup: 'S0EXAMPLE' });
+    expect(res.users).toEqual(['U1', 'U2']);
+    expect(call).not.toHaveBeenCalled();
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe('https://slack.com/api/usergroups.users.list');
+    expect(init.headers['Content-Type']).toBe('application/x-www-form-urlencoded');
+    expect(init.headers.Authorization).toBe('Bearer xoxb-a');
+    expect(init.body).toBe('usergroup=S0EXAMPLE');
+  });
+
+  it("exposes Slack's error at err.data.error", async () => {
+    reply({ ok: false, error: 'missing_scope' });
+    const err: any = await slackClientForToken('xoxb-a')
+      .usergroups!.users.list({ usergroup: 'S1' })
+      .catch((e) => e);
+    expect(err.data).toEqual({ error: 'missing_scope' });
+    expect(err.name).toBe('SlackApiError');
+    expect(err.message).not.toContain('xoxb');
+  });
+
+  it('maps a network failure to an error too', async () => {
+    fetchMock.mockRejectedValue(new Error('socket hang up'));
+    const err: any = await slackClientForToken('xoxb-a')
+      .usergroups!.users.list({ usergroup: 'S1' })
+      .catch((e) => e);
+    expect(err.data.error).toBe('socket hang up');
   });
 });
 
