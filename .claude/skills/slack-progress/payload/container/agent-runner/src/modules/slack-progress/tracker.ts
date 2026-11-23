@@ -86,8 +86,8 @@ export function createProgressTracker(deps: TrackerDeps): {
   // turn shows only the steps created or updated in that turn.
   const tasks = new Map<string, TaskStep>();
   let lastTaskId = 0;
-  // TaskCreate calls waiting for their result, by tool_use id -> the key their step has now.
-  // The result carries the SDK's real id; until it arrives the step sits under a counter id.
+  // TaskCreate calls waiting for their result, by tool_use id -> the step's provisional key
+  // (`pending:<tool_use id>`). The result carries the SDK's real id, which replaces that key.
   const pendingCreates = new Map<string, string>();
 
   function nextFreeId(): string {
@@ -119,11 +119,18 @@ export function createProgressTracker(deps: TrackerDeps): {
     if (key === undefined) return;
     pendingCreates.delete(useId);
     const real = /^Task #(\S+) created successfully/.exec(text)?.[1];
-    if (!real) return;
-    // Another step still waiting under this key moves out of the way first.
-    if (real !== key && tasks.has(real)) rekey(real, nextFreeId());
-    rekey(key, real);
-    noteRealId(real);
+    if (real) {
+      // The create is the newest word on this id: a step that an earlier update added under it is replaced.
+      if (real !== key && tasks.has(real)) {
+        tasks.delete(real);
+        if (turn) turn.shown.delete(real);
+      }
+      rekey(key, real);
+      noteRealId(real);
+    } else {
+      // No id in the result: fall back to the counter.
+      rekey(key, nextFreeId());
+    }
     if (turn) {
       syncTodos(turn);
       flush(turn);
@@ -145,7 +152,9 @@ export function createProgressTracker(deps: TrackerDeps): {
   function taskEvent(name: string, input: Record<string, unknown>, useId?: string): void {
     if (name === 'TaskCreate') {
       const subject = typeof input.subject === 'string' ? input.subject : '';
-      const id = nextFreeId();
+      // With a tool_use id the step waits under a key no TaskUpdate can name, until its result
+      // gives the real id. Without one, the counter is all there is.
+      const id = useId ? `pending:${useId}` : nextFreeId();
       tasks.set(id, { title: subject, status: 'pending' });
       if (useId) pendingCreates.set(useId, id);
       if (turn) {

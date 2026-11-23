@@ -351,6 +351,31 @@ describe('progress tracker', () => {
         ]);
       });
 
+      test('after a restart, a TaskCreate and a TaskUpdate for an old id in one batch do not cross', () => {
+        const { tracker, rows } = setup();
+        tracker.onEvent(start());
+        tracker.onEvent(createId('d', 'u1'));
+        tracker.onEvent(update('1', 'completed'));
+        tracker.onEvent(result('u1', created('4', 'd')));
+        tracker.onEvent({ type: 'turn_end', outcome: 'done' });
+        expect(last(rows)).toEqual([{ title: 'd', status: 'pending' }]);
+        const { tracker: t2, rows: r2 } = setup();
+        t2.onEvent(start());
+        t2.onEvent(createId('d', 'u1'));
+        t2.onEvent(result('u1', created('4', 'd')));
+        t2.onEvent(update('4', 'completed'));
+        t2.onEvent({ type: 'turn_end', outcome: 'done' });
+        expect(last(r2)).toEqual([{ title: 'd', status: 'completed' }]);
+      });
+
+      test('an unknown-id update with status deleted is ignored even with a subject', () => {
+        const { tracker, rows } = setup();
+        tracker.onEvent(start());
+        tracker.onEvent(update('3', 'deleted', { subject: 'gone' }));
+        tracker.onEvent({ type: 'turn_end', outcome: 'done' });
+        expect(rows).toHaveLength(0);
+      });
+
       test('TaskUpdate for an unknown id adds the step when it carries a subject, else is ignored', () => {
         const { tracker, rows } = setup();
         tracker.onEvent(start());
