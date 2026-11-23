@@ -57,7 +57,7 @@ zod@4.6.7
 `slack-ui-kit` is not on npm. It installs from a GitHub release tag, pinned to that tag:
 
 ```nc:run effect:external
-pnpm add github:GokulramGHV/slack-ui-kit#v0.1.1
+pnpm add github:GokulramGHV/slack-ui-kit#v0.1.2
 ```
 
 The kit depends on `@openuidev/lang-core`, whose install script is telemetry. pnpm skips it, and it stays skipped: never add `@openuidev/lang-core` to `onlyBuiltDependencies` in `pnpm-workspace.yaml`. The module also sets `OPENUI_TELEMETRY_DISABLED=1` before the kit loads.
@@ -243,6 +243,7 @@ A press on a button, feedback, or a form submit sends a message like `<webhook s
 - `template`: the template name.
 - `control`: the control's id (its statement name).
 - `value`: the pressed control's value. For a form submit it is an object of the submitted values, keyed by variable name without `$`.
+- `labels`: present when the press carried chosen options. The text the person saw for each chosen option, under the same names as `value` (a string for a select or radio, a list for checkboxes and multi-selects). Text, date and other fields have none. Use it, not `value`, when repeating a choice to people.
 - `user`: `{ id, name }` of the person who pressed.
 - `state`: the card's current state after the press, with keys without `$` (`pick`, `choice`). A submit event holds the final ticks and inputs.
 - `locked`: `true` when this press locked the card.

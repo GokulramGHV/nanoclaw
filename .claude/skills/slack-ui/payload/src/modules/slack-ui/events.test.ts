@@ -98,6 +98,26 @@ describe('writeCardEvent', () => {
     expect(JSON.parse(msg.content).payload.value).toEqual({ comment: 'hi' });
   });
 
+  it('adds labels with $ stripped when the event has them, and no labels key otherwise', async () => {
+    await writeCardEvent(
+      event({
+        type: 'submit',
+        control: {
+          id: 'form:note',
+          kind: 'form',
+          value: { $size: 'm', $tags: ['a', 'b'] },
+          labels: { $size: 'Medium', $tags: ['Alpha', 'Beta'] },
+        },
+      }),
+    );
+    const withLabels = JSON.parse(write.mock.calls[0]![2].content).payload;
+    expect(withLabels.labels).toEqual({ size: 'Medium', tags: ['Alpha', 'Beta'] });
+    expect(withLabels.value).toEqual({ size: 'm', tags: ['a', 'b'] });
+    write.mockClear();
+    await writeCardEvent(event());
+    expect('labels' in JSON.parse(write.mock.calls[0]![2].content).payload).toBe(false);
+  });
+
   it('keeps the noted context for a retry after a failed write, and drops it after success', async () => {
     noteEventContext('C1', '1.1', 'U2', { actionTs: '7.7' });
     write.mockRejectedValueOnce(new Error('disk full'));

@@ -116,6 +116,7 @@ export async function writeCardEvent(event: CardEvent, stored?: CardRecord): Pro
           template: str(event.meta?.template) ?? '',
           control: event.control.id,
           value: stripDollar(event.control.value ?? null),
+          ...(event.control.labels ? { labels: stripDollar(event.control.labels) } : {}),
           user: { id: event.user, name: ctx?.userName ?? '' },
           state: stripDollar(event.state),
           locked: event.locked !== undefined,
