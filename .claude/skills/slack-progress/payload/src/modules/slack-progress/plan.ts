@@ -134,23 +134,38 @@ async function finish(turnId: string, sessionId: string, ts: string, row: Progre
   entry.closed = true;
   entry.latest = row;
   clearWorkingStatus(sessionId, turnId);
-  try {
-    await send('chat.update', entry.token, { channel: entry.channel, ts }, row);
-  } catch (err) {
-    log.warn('slack-progress: summary update failed', { turnId, err: String(err) });
-    // Slack refused the switch from task cards to a plan. Close with plain text instead.
+  // A turn that ends with no steps leaves only a bare "Done in 5s" line, so remove the message.
+  let removed = false;
+  if (row.outcome === 'done' && row.todos.length === 0) {
     try {
-      const plain = renderPlainSummary(row);
-      await withRateLimitRetry(() =>
-        slackCall(
-          entry.token,
-          'chat.update',
-          { channel: entry.channel, ts, text: plain.text, blocks: plain.blocks },
-          'progress',
-        ),
-      );
-    } catch (err2) {
-      log.warn('slack-progress: plain summary update failed', { turnId, err: String(err2) });
+      await withRateLimitRetry(() => slackCall(entry.token, 'chat.delete', { channel: entry.channel, ts }, 'progress'));
+      removed = true;
+    } catch (err) {
+      log.warn('slack-progress: could not delete empty plan, drawing the summary instead', {
+        turnId,
+        err: String(err),
+      });
+    }
+  }
+  if (!removed) {
+    try {
+      await send('chat.update', entry.token, { channel: entry.channel, ts }, row);
+    } catch (err) {
+      log.warn('slack-progress: summary update failed', { turnId, err: String(err) });
+      // Slack refused the switch from task cards to a plan. Close with plain text instead.
+      try {
+        const plain = renderPlainSummary(row);
+        await withRateLimitRetry(() =>
+          slackCall(
+            entry.token,
+            'chat.update',
+            { channel: entry.channel, ts, text: plain.text, blocks: plain.blocks },
+            'progress',
+          ),
+        );
+      } catch (err2) {
+        log.warn('slack-progress: plain summary update failed', { turnId, err: String(err2) });
+      }
     }
   }
   await closePlan(turnId).catch((err) => {
@@ -223,6 +238,12 @@ async function process_(row: ProgressRow, content: Record<string, unknown>, sess
       closed: false,
       createdAt: now,
     };
+    // A turn whose first row is already done with no steps has nothing worth posting. Record
+    // it closed so a later row for the turn is ignored; messageTs stays null.
+    if (row.outcome === 'done' && row.todos.length === 0) {
+      await upsertPlan({ ...base, closed: true });
+      return;
+    }
     await upsertPlan(base);
     const res = await send('chat.postMessage', token, { channel, ...(threadTs ? { thread_ts: threadTs } : {}) }, row);
     if (typeof res.ts !== 'string') throw new Error('Slack did not return a message timestamp');

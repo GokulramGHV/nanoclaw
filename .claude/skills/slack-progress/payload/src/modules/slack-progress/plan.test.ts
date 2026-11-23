@@ -138,6 +138,56 @@ describe('progress action', () => {
     expect(call).toHaveBeenCalledTimes(1);
   });
 
+  describe('a turn that ends with no steps', () => {
+    const noSteps = (over: Record<string, unknown> = {}) => content({ todos: [], ...over });
+
+    it('done with no todos deletes the plan message instead of drawing a summary', async () => {
+      await handleProgress(noSteps(), session);
+      call.mockClear();
+      await handleProgress(noSteps({ outcome: 'done', elapsedMs: 5000 }), session);
+      expect(call).toHaveBeenCalledTimes(1);
+      expect(call.mock.calls[0][0]).toBe('xoxb-test');
+      expect(call.mock.calls[0][1]).toBe('chat.delete');
+      expect(call.mock.calls[0][2]).toEqual({ channel: 'C1', ts: '200.1' });
+      expect(plans.get('turn1').closed).toBe(true);
+    });
+
+    it('a failed delete falls back to the summary update and still closes', async () => {
+      await handleProgress(noSteps(), session);
+      call.mockClear();
+      call.mockRejectedValueOnce(new Error('cant_delete_message'));
+      await handleProgress(noSteps({ outcome: 'done', elapsedMs: 5000 }), session);
+      expect(call.mock.calls.map((c) => c[1])).toEqual(['chat.delete', 'chat.update']);
+      expect((call.mock.calls[1][2] as { text: string }).text).toContain('Done in 5s');
+      expect(log.warn).toHaveBeenCalled();
+      expect(plans.get('turn1').closed).toBe(true);
+    });
+
+    it('done with todos keeps its summary and deletes nothing', async () => {
+      await handleProgress(content(), session);
+      call.mockClear();
+      await handleProgress(content({ outcome: 'done', elapsedMs: 5000 }), session);
+      expect(call.mock.calls.map((c) => c[1])).toEqual(['chat.update']);
+    });
+
+    it('error with no todos keeps its summary and deletes nothing', async () => {
+      await handleProgress(noSteps(), session);
+      call.mockClear();
+      await handleProgress(noSteps({ outcome: 'error', elapsedMs: 5000 }), session);
+      expect(call.mock.calls.map((c) => c[1])).toEqual(['chat.update']);
+      expect(plans.get('turn1').closed).toBe(true);
+    });
+
+    it('a first row already done with no todos makes no Slack call and records a closed plan', async () => {
+      await handleProgress(noSteps({ outcome: 'done' }), session);
+      expect(call).not.toHaveBeenCalled();
+      expect(plans.get('turn1').closed).toBe(true);
+      expect(plans.get('turn1').messageTs).toBeNull();
+      await handleProgress(noSteps(), session); // a later row for the turn is ignored
+      expect(call).not.toHaveBeenCalled();
+    });
+  });
+
   it('a timer draw in flight when the summary arrives cannot overwrite it or reopen the row', async () => {
     await handleProgress(content(), session);
     call.mockClear();
