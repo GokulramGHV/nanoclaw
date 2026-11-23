@@ -45,23 +45,49 @@ export function createHold(deps: HoldDeps): {
   onEvent(e: ProgressEvent): void;
   offer(row: ChatRowInfo, write: Write): boolean;
   barrier(platformId: string): Promise<void>;
+  /** Results (or queued writes) for this chat are not written yet, so a later message must not stream. */
+  hasPending(platformId: string): boolean;
 } {
   let chats = new Map<string, Chat>();
   /** Writes run one after another, so order holds and a later offer can queue behind them. */
   let tail: Promise<void> = Promise.resolve();
   let inflight = 0;
 
-  function run(writes: Write[]): Promise<void> {
-    inflight++;
-    const next = tail.then(async () => {
-      for (const write of writes) {
+  async function exec(writes: Write[], sequential: boolean): Promise<void> {
+    if (!sequential) {
+      // Nothing in flight: start every write now, so each row is in outbound.db before
+      // this call returns (the inserts are synchronous and keep call order). The result
+      // door checks outbound.db right after turn_end and must find a held reply there.
+      const started = writes.map((write) => {
         try {
-          await write();
+          return write();
+        } catch (err) {
+          return Promise.reject(err);
+        }
+      });
+      for (const p of started) {
+        try {
+          await p;
         } catch (err) {
           deps.log(`held message write failed: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
-    });
+      return;
+    }
+    for (const write of writes) {
+      try {
+        await write();
+      } catch (err) {
+        deps.log(`held message write failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
+
+  function run(writes: Write[]): Promise<void> {
+    const idle = inflight === 0;
+    inflight++;
+    // When writes are queued behind others they run one after another, so order holds.
+    const next = idle ? exec(writes, false) : tail.then(() => exec(writes, true));
     tail = next.finally(() => {
       inflight--;
     });
@@ -153,23 +179,37 @@ export function createHold(deps: HoldDeps): {
     }
   }
 
-  return { onEvent, offer, barrier };
+  function hasPending(platformId: string): boolean {
+    if (inflight > 0) return true;
+    for (const c of chats.values()) {
+      if (c.platformId === platformId && c.items.some((i) => !i.droppable)) return true;
+    }
+    return false;
+  }
+
+  return { onEvent, offer, barrier, hasPending };
 }
 
-const CARD_TOOL = /(^|__)post_card$/;
+/** Tools that write their own row to a chat, so held text for that chat must go out before them. */
+const CHAT_TOOLS = new Set(['post_card', 'ask_user_question', 'send_card', 'send_message']);
 
 /**
- * Observer for card tools that write their own row. Tool events fire before the tool
- * runs, so held text for the turn's chat is written first and the card has its context.
- * This lives here, not in the card tool, so the card skill never depends on this module.
+ * Observer for tools that write a row to a chat themselves. Tool events fire in the
+ * poll-loop process before the tool runs, so held text for the chat is written first and
+ * the card, question or message has its context. A tool's MCP name may carry a prefix
+ * (`mcp__server__post_card`); the bare name is matched. `chatOf` says which chat the tool
+ * writes to (null: none, or not this turn's chat). Lives here, not in the tools, because
+ * the tools run in another process and the card skill must not depend on this module.
  */
-export function flushHoldOnCardTool(
+export function flushHoldOnChatTool(
   hold: { barrier(platformId: string): Promise<void> },
-  currentPlatformId: () => string | null,
+  chatOf: (tool: string, input: Record<string, unknown>) => string | null,
 ): (e: ProgressEvent) => void {
   return (e) => {
-    if (e.type !== 'tool' || !CARD_TOOL.test(e.name)) return;
-    const platformId = currentPlatformId();
+    if (e.type !== 'tool') return;
+    const tool = e.name.replace(/^.*__/, '');
+    if (!CHAT_TOOLS.has(tool)) return;
+    const platformId = chatOf(tool, e.input ?? {});
     if (platformId) void hold.barrier(platformId);
   };
 }

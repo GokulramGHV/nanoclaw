@@ -13,7 +13,6 @@ import { findByName, getAllDestinations } from '../destinations.js';
 import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
 import { getCurrentInReplyTo, getCurrentReplyRoute } from '../db/session-state.js';
 import { resolveDestinationThread } from '../db/session-routing.js';
-import { holdBarrier } from '../progress-seam.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -90,8 +89,6 @@ export const sendMessage: McpToolDefinition = {
     if ('error' in routing) return err(routing.error);
 
     const id = generateId();
-    // Anything a hold kept back for this chat goes first, so the order is kept.
-    await holdBarrier(routing.platform_id);
     const seq = await writeMessageOut({
       id,
       in_reply_to: getCurrentInReplyTo(),

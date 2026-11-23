@@ -11,7 +11,7 @@ import {
   registerHoldBarrier,
   registerProgressObserver,
 } from '../../progress-seam.js';
-import { createHold, flushHoldOnCardTool } from './hold.js';
+import { createHold, flushHoldOnChatTool } from './hold.js';
 import { createStreamer, MARKER_PATH } from './streamer.js';
 import { createProgressTracker } from './tracker.js';
 
@@ -46,7 +46,8 @@ const streamer = createStreamer({
     if (!dest || dest.type !== 'channel' || !dest.platformId || !dest.channelType) return null;
     return { platformId: dest.platformId, channelType: dest.channelType };
   },
-  held: (platformId) => tracker.stepsOpen(platformId),
+  // Also while results wait to be written, so a closing line never streams above them.
+  held: (platformId) => tracker.stepsOpen(platformId) || hold.hasPending(platformId),
 });
 const hold = createHold({
   stepsOpen: (platformId) => tracker.stepsOpen(platformId),
@@ -60,7 +61,15 @@ registerProgressObserver((e) => {
   streamer.onEvent(e);
   hold.onEvent(e);
 });
-registerProgressObserver(flushHoldOnCardTool(hold, () => tracker.currentPlatformId()));
+registerProgressObserver(
+  flushHoldOnChatTool(hold, (tool, input) => {
+    const current = tracker.currentPlatformId();
+    if (tool !== 'send_message') return current;
+    // A direct send goes where its destination says; only this turn's chat has held text.
+    const dest = typeof input.to === 'string' ? findByName(input.to) : null;
+    return dest && dest.type === 'channel' && dest.platformId === current ? current : null;
+  }),
+);
 registerChatRowHold((row, write) => hold.offer(row, write));
 registerChatRowDecorator((row) => streamer.decorate(row));
 registerHoldBarrier((platformId) => hold.barrier(platformId));

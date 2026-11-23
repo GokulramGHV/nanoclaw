@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'bun:test';
 import type { MessageInRow } from '../../db/messages-in.js';
 import type { ChatRowInfo, ProgressEvent } from '../../progress-seam.js';
-import { createHold, flushHoldOnCardTool } from './hold.js';
+import { getUndeliveredMessages } from '../../db/messages-out.js';
+import { closeSessionDb, getInboundDb, initTestSessionDb } from '../../mailbox/sqlite/connection.js';
+import { processQuery } from '../../poll-loop.js';
+import type { ProviderEvent } from '../../providers/types.js';
+import { _resetProgressSeamForTesting, registerChatRowHold, registerProgressObserver } from '../../progress-seam.js';
+import { createHold, flushHoldOnChatTool } from './hold.js';
 import { createProgressTracker } from './tracker.js';
 import { createStreamer, type StreamAbortRow, type StreamAppendRow } from './streamer.js';
 
@@ -172,28 +177,114 @@ describe('mid-task message hold', () => {
   });
 });
 
-describe('post_card tool event', () => {
-  it('flushes the latest held message for the turn chat before the card is written', async () => {
-    const { hold, offer, written } = setup({ value: true });
-    const observer = flushHoldOnCardTool(hold, () => 'slack:C1');
-    hold.onEvent(start());
-    offer('slack:C1', 'Here is the form:');
-    // The same event reaches every observer, hold first.
-    const e = tool('mcp__nanoclaw__post_card');
-    hold.onEvent(e);
-    observer(e);
-    await flush();
-    expect(written).toEqual(['Here is the form:']);
-  });
+describe('chat tools flush the hold before their own row', () => {
+  const NAMES = ['post_card', 'ask_user_question', 'send_card', 'send_message'];
+  for (const name of NAMES) {
+    for (const full of [name, `mcp__nanoclaw__${name}`]) {
+      it(`${full}: the held text is in the outbox before the tool's own row`, () => {
+        const { hold, offer, written } = setup({ value: true });
+        const observer = flushHoldOnChatTool(hold, () => 'slack:C1');
+        hold.onEvent(start());
+        offer('slack:C1', 'Here is the context');
+        // The same event reaches every observer, hold first; the tool runs afterwards.
+        const e = tool(full);
+        hold.onEvent(e);
+        observer(e);
+        // No awaiting: the tool's row is written right after the event is handled.
+        const order = [...written];
+        written.push('tool-row');
+        expect(order).toEqual(['Here is the context']);
+        expect(written).toEqual(['Here is the context', 'tool-row']);
+      });
+    }
+  }
 
-  it('ignores other tools and a turn with no chat', async () => {
+  it('ignores other tools, and a tool that writes to no chat of this turn', async () => {
     const { hold, offer, written } = setup({ value: true });
-    const observer = flushHoldOnCardTool(hold, () => null);
     offer('slack:C1', 'held');
-    observer(tool('mcp__nanoclaw__post_card'));
-    observer(tool('Read'));
+    flushHoldOnChatTool(hold, () => null)(tool('mcp__nanoclaw__post_card'));
+    flushHoldOnChatTool(hold, () => 'slack:C1')(tool('Read'));
     await flush();
     expect(written).toEqual([]);
+  });
+});
+
+describe('queued writes', () => {
+  it('a write that starts while another is in flight waits for it, keeping order', async () => {
+    const order: string[] = [];
+    const hold = createHold({ stepsOpen: () => true, log: () => {} });
+    hold.onEvent(start());
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    hold.offer(row('slack:C1', 'A'), async () => {
+      await gate;
+      order.push('A');
+    });
+    hold.onEvent(end);
+    hold.offer(row('slack:C1', 'B'), async () => void order.push('B'));
+    hold.onEvent(start());
+    hold.onEvent(end);
+    release();
+    await flush();
+    await flush();
+    expect(order).toEqual(['A', 'B']);
+  });
+
+  it('hasPending is true while results wait, and false once written', async () => {
+    const { hold, offer } = setup({ value: true });
+    hold.onEvent(start());
+    offer('slack:C1', 'R');
+    expect(hold.hasPending('slack:C1')).toBe(true);
+    expect(hold.hasPending('slack:C2')).toBe(false);
+    hold.onEvent(end);
+    await flush();
+    expect(hold.hasPending('slack:C1')).toBe(false);
+  });
+
+  it('a closing line after a held result is not streamed and goes out after the result', async () => {
+    const open = { value: true };
+    const rows: (StreamAppendRow | StreamAbortRow)[] = [];
+    const written: string[] = [];
+    let hold: ReturnType<typeof createHold>;
+    const streamer = createStreamer({
+      now: () => 0,
+      setTimer: () => () => {},
+      send: (r) => rows.push(r),
+      enabled: () => true,
+      newId: () => 's-1',
+      resolve: () => ({ platformId: 'C1', channelType: 'slack' }),
+      held: (p) => open.value || hold.hasPending(p),
+    });
+    hold = createHold({
+      stepsOpen: () => open.value,
+      log: () => {},
+      onHeld: (r) => streamer.dropFinished(r.platformId, r.body),
+    });
+    const msg = {
+      id: 'm1',
+      trigger: 1,
+      kind: 'chat-sdk',
+      channel_type: 'slack',
+      on_wake: 0,
+      content: JSON.stringify({ senderId: 'slack:U1' }),
+    } as unknown as MessageInRow;
+    const ev = (e: ProgressEvent) => {
+      streamer.onEvent(e);
+      hold.onEvent(e);
+    };
+    ev({
+      type: 'turn_start',
+      routing: { platformId: 'C1', channelType: 'slack', threadId: 't', inReplyTo: null, taskRun: false } as never,
+      messages: [msg],
+    });
+    hold.offer(row('C1', 'The full answer'), async () => void written.push('The full answer'));
+    open.value = false;
+    // The sign-off is written while the result is still unwritten: it must not open a stream.
+    ev({ type: 'text_delta', text: '<message to="room">Anything else?</message>' });
+    expect(rows).toEqual([]);
+    expect(hold.offer(row('C1', 'Anything else?'), async () => void written.push('Anything else?'))).toBe(true);
+    await flush();
+    expect(written).toEqual(['The full answer', 'Anything else?']);
   });
 });
 
@@ -282,5 +373,43 @@ describe('hold with the tracker (no plan shown means no hold)', () => {
     ]);
     // Once aborted it is no longer decorated, so the later write is a plain message.
     expect(streamer.decorate(row('C1', 'On it, here is my plan'))).toBeNull();
+  });
+});
+
+describe('held reply and the result door', () => {
+  it('a held final reply is in outbound.db before the result door checks, so no wrap-nudge is pushed', async () => {
+    initTestSessionDb();
+    getInboundDb().exec(
+      `INSERT INTO destinations (name, display_name, type, channel_type, platform_id)
+       VALUES ('main', 'Main', 'channel', 'slack', 'channel-1')`,
+    );
+    const hold = createHold({ stepsOpen: () => true, log: () => {} });
+    registerProgressObserver((e) => hold.onEvent(e));
+    registerChatRowHold((r, w) => hold.offer(r, w));
+    const pushes: string[] = [];
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'text', text: '<message to="main">Final answer</message>' };
+      yield { type: 'result', text: '<message to="main">Final answer</message>' };
+    }
+    try {
+      await processQuery(
+        { push: (m: string) => void pushes.push(m), end: () => {}, abort: () => {}, events: events() },
+        { platformId: 'channel-1', channelType: 'slack', threadId: 'thread-a', inReplyTo: 'request-a', taskRun: false },
+        ['request-a'],
+        'claude',
+        undefined,
+        'prompt',
+        undefined,
+        true,
+      );
+      await flush();
+      const rows = getUndeliveredMessages().filter((r) => r.kind === 'chat');
+      expect(rows).toHaveLength(1);
+      expect(JSON.parse(rows[0].content).text).toBe('Final answer');
+      expect(pushes).toEqual([]);
+    } finally {
+      _resetProgressSeamForTesting();
+      closeSessionDb();
+    }
   });
 });
