@@ -1,7 +1,7 @@
 /**
  * Writes a kit card event to the agent as a `card_event` webhook message. The
- * message id carries the card's save version, so a redelivered event is
- * written once.
+ * message id carries Slack's action_ts for a click or the view id for a form
+ * submit, so a redelivered event is written once.
  */
 import type { CardEvent, CardRecord } from 'slack-ui-kit';
 
