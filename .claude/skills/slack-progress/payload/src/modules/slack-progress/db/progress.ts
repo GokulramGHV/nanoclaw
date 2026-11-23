@@ -26,6 +26,8 @@ export interface StreamRow {
   streamTs: string | null;
   status: StreamStatus;
   sentText: string;
+  /** Slack rate limited an append: no more appends, and the reply is posted in full. */
+  held: boolean;
   updatedAt: string;
   createdAt: string;
 }
@@ -54,6 +56,7 @@ interface StreamDbRow {
   stream_ts: string | null;
   status: StreamStatus;
   sent_text: string;
+  held: number;
   updated_at: string;
   created_at: string;
 }
@@ -82,6 +85,7 @@ const streamFromRow = (r: StreamDbRow): StreamRow => ({
   streamTs: r.stream_ts,
   status: r.status,
   sentText: r.sent_text,
+  held: r.held === 1,
   updatedAt: r.updated_at,
   createdAt: r.created_at,
 });
@@ -151,8 +155,8 @@ export async function upsertStream(row: StreamRow): Promise<void> {
   await getDb().run(
     `INSERT INTO progress_streams (
        stream_id, session_id, instance, channel_id, thread_ts, stream_ts,
-       status, sent_text, updated_at, created_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       status, sent_text, held, updated_at, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(stream_id) DO UPDATE SET
        session_id = excluded.session_id,
        instance = excluded.instance,
@@ -161,6 +165,7 @@ export async function upsertStream(row: StreamRow): Promise<void> {
        stream_ts = excluded.stream_ts,
        status = excluded.status,
        sent_text = excluded.sent_text,
+       held = excluded.held,
        updated_at = excluded.updated_at`,
     row.streamId,
     row.sessionId,
@@ -170,6 +175,7 @@ export async function upsertStream(row: StreamRow): Promise<void> {
     row.streamTs,
     row.status,
     row.sentText,
+    row.held ? 1 : 0,
     row.updatedAt,
     row.createdAt,
   );

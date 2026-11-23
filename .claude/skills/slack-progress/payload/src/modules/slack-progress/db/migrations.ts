@@ -43,3 +43,12 @@ registerMigration({
     `);
   },
 });
+
+/** A stream held because Slack rate limited an append: its final text is posted in full instead. */
+registerMigration({
+  version: 2,
+  name: 'module:slack-progress:stream-held',
+  async up(db) {
+    await db.exec('ALTER TABLE progress_streams ADD COLUMN held INTEGER NOT NULL DEFAULT 0;');
+  },
+});

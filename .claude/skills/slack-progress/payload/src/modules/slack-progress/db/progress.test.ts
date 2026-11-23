@@ -38,6 +38,7 @@ const stream = (over: Partial<StreamRow> = {}): StreamRow => ({
   streamTs: null,
   status: 'open',
   sentText: '',
+  held: false,
   updatedAt: '2026-01-01T00:00:00.000Z',
   createdAt: '2026-01-01T00:00:00.000Z',
   ...over,
@@ -62,13 +63,14 @@ describe('progress storage', () => {
     expect(await getStream('stream-1')).toEqual(stream());
 
     await upsertPlan(plan({ messageTs: '1700000001.000200', closed: true, createdAt: 'ignored' }));
-    await upsertStream(stream({ streamTs: '1700000002.000300', status: 'stopped', sentText: 'hi' }));
+    await upsertStream(stream({ streamTs: '1700000002.000300', status: 'stopped', sentText: 'hi', held: true }));
     expect(await getPlan('turn-1')).toMatchObject({ messageTs: '1700000001.000200', closed: true });
     expect((await getPlan('turn-1'))!.createdAt).toBe('2026-01-01T00:00:00.000Z');
     expect(await getStream('stream-1')).toMatchObject({
       streamTs: '1700000002.000300',
       status: 'stopped',
       sentText: 'hi',
+      held: true,
     });
   });
 

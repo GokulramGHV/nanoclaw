@@ -148,6 +148,7 @@ async function appendWork(content: Record<string, unknown>, session: Session): P
       streamTs: null,
       status: 'open',
       sentText: '',
+      held: false,
       updatedAt: now,
       createdAt: now,
     };
@@ -185,13 +186,15 @@ async function appendWork(content: Record<string, unknown>, session: Session): P
     await callOnce(token, 'chat.appendStream', { channel: row.channelId, ts: row.streamTs, markdown_text: text });
     await save(row, { sentText: row.sentText + text });
   } catch (err) {
+    const held = isRateLimited(err);
     log.warn(
-      isRateLimited(err)
-        ? 'slack-progress: stream append rate limited, holding stream'
-        : 'slack-progress: stream append failed',
-      { streamId, err: String(err) },
+      held ? 'slack-progress: stream append rate limited, holding stream' : 'slack-progress: stream append failed',
+      {
+        streamId,
+        err: String(err),
+      },
     );
-    await save(row, { status: 'failed' });
+    await save(row, { status: 'failed', held });
   }
 }
 
@@ -215,6 +218,29 @@ export async function endWithNote(row: StreamRow, note: string): Promise<void> {
     clearTypingStatus(row, token);
   } catch (err) {
     log.warn('slack-progress: could not end stream with note', { streamId: row.streamId, err: String(err) });
+  }
+}
+
+/**
+ * Remove a held stream's partial message, the way a stream abort does, so the full reply the
+ * bridge posts next appears once. If the stream cannot be removed, end it with the note.
+ */
+async function discardHeld(row: StreamRow): Promise<void> {
+  const token = envValue(botTokenKeyForInstance(row.instance));
+  if (!token || !row.streamTs) return;
+  try {
+    await call(token, 'chat.stopStream', { channel: row.channelId, ts: row.streamTs });
+  } catch (err) {
+    log.warn('slack-progress: could not stop held stream', { streamId: row.streamId, err: String(err) });
+    await endWithNote(row, NOTE_BELOW);
+    return;
+  }
+  clearTypingStatus(row, token);
+  try {
+    await call(token, 'chat.delete', { channel: row.channelId, ts: row.streamTs });
+  } catch (err) {
+    log.warn('slack-progress: could not delete held stream, marking it', { streamId: row.streamId, err: String(err) });
+    await call(token, 'chat.update', { channel: row.channelId, ts: row.streamTs, text: NOTE_BELOW }).catch(() => {});
   }
 }
 
@@ -254,7 +280,8 @@ async function interceptWork(
   const row = await getStream(streamId);
   if (!row || row.sessionId !== session.id || row.channelId !== chat.channel) return null;
   if (row.status === 'failed') {
-    await endWithNote(row, NOTE_BELOW);
+    if (row.held) await discardHeld(row);
+    else await endWithNote(row, NOTE_BELOW);
     return null;
   }
   if (row.status !== 'open') return null;
@@ -286,8 +313,10 @@ async function interceptWork(
     clearTypingStatus(row, token);
   } catch (err) {
     log.warn('slack-progress: could not finish stream', { streamId, err: String(err) });
-    await save(row, { status: 'failed' });
-    await endWithNote(row, NOTE_BELOW);
+    const held = isRateLimited(err) && rest !== '';
+    await save(row, { status: 'failed', held });
+    if (held) await discardHeld(row);
+    else await endWithNote(row, NOTE_BELOW);
     return null;
   }
   await save(row, { status: 'stopped', sentText: finalText }).catch((err) => {
