@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'bun:test';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { CLAIMS_DIR, claimMessage, isMessageClaimed, releaseMessage } from './message-claims.js';
+import { CLAIMS_DIR, CLAIM_TTL_MS, claimMessage, isMessageClaimed, releaseMessage } from './message-claims.js';
 
 const ids = ['plain', '../escape', 'a/b/c', '..', 'x'.repeat(500)];
 afterEach(() => ids.forEach(releaseMessage));
@@ -35,5 +35,19 @@ describe('message claims', () => {
     expect(isMessageClaimed('a')).toBe(false);
     expect(isMessageClaimed('a_b')).toBe(false);
     releaseMessage('a/b');
+  });
+
+  it('ignores and removes a claim older than the expiry', () => {
+    claimMessage('plain');
+    const old = new Date(Date.now() - CLAIM_TTL_MS - 5000);
+    const file = path.join(CLAIMS_DIR, Buffer.from('plain').toString('base64url'));
+    fs.utimesSync(file, old, old);
+    expect(isMessageClaimed('plain')).toBe(false);
+    expect(fs.existsSync(file)).toBe(false);
+  });
+
+  it('keeps a claim that is still inside the expiry', () => {
+    claimMessage('plain');
+    expect(isMessageClaimed('plain', Date.now() + CLAIM_TTL_MS - 1000)).toBe(true);
   });
 });

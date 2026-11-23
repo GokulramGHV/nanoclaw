@@ -5,7 +5,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { getInboundDb, getOutboundDb, closeSessionDb, initTestSessionDb } from '../mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';
 import { getPendingMessages } from '../db/messages-in.js';
-import { isMessageClaimed } from '../message-claims.js';
+import { isMessageClaimed, releaseMessage } from '../message-claims.js';
 import { ask, askSettings, parseAskInput } from './ask.js';
 import { createMcpServer, registerTools } from './server.js';
 
@@ -89,7 +89,7 @@ describe('ask input', () => {
 });
 
 describe('ask wait', () => {
-  it('claims the answer before writing the action row, then returns the answer and releases', async () => {
+  it('claims the answer before writing the action row, then returns the answer and leaves the claim to expire', async () => {
     const waiting = ask.handler({ questions: [q(), q({ question: 'Pick', multiSelect: true, allowOther: true })] });
     const questionId = await waitForQuestionId();
     expect(isMessageClaimed(`ask-${questionId}`)).toBe(true);
@@ -112,7 +112,8 @@ describe('ask wait', () => {
     const result = await waiting;
     expect(result.isError).not.toBe(true);
     expect(result.content[0].text).toBe('Answered by <@U1234567>:\n1. Which one?: A\n2. Pick: A, B; other: "more"');
-    expect(isMessageClaimed(`ask-${questionId}`)).toBe(false);
+    expect(isMessageClaimed(`ask-${questionId}`)).toBe(true);
+    releaseMessage(`ask-${questionId}`);
     const ack = getOutboundDb()
       .prepare('SELECT status FROM processing_ack WHERE message_id = ?')
       .get(`ask-${questionId}`) as { status: string } | undefined;
@@ -131,14 +132,14 @@ describe('ask wait', () => {
     );
   });
 
-  it('returns an error for a failed row and releases the claim', async () => {
+  it('returns an error for a failed row', async () => {
     const waiting = ask.handler({ questions: [q()] });
     const questionId = await waitForQuestionId();
     insertAnswer(questionId, { failed: 'not a Slack chat' });
     const result = await waiting;
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('not a Slack chat');
-    expect(isMessageClaimed(`ask-${questionId}`)).toBe(false);
+    releaseMessage(`ask-${questionId}`);
   });
 
   it('on timeout releases the claim and reports no answer without an error flag', async () => {

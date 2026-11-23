@@ -61,10 +61,19 @@ function isCardEvent(row: InboundRow, content: Record<string, unknown> | null): 
   return row.kind === 'webhook' && content?.source === 'slack-ui' && content.event === 'card_event';
 }
 
+function isAskAnswer(row: InboundRow, content: Record<string, unknown> | null): boolean {
+  return row.kind === 'webhook' && content?.source === 'slack-ui' && content.event === 'ask_answer';
+}
+
 /** A row that can name an owner: a triggering chat message or slack-ui card_event. */
 function isOwnerRow(row: InboundRow): boolean {
   if (row.trigger !== 1) return false;
-  return row.kind === 'chat' || row.kind === 'chat-sdk' || isCardEvent(row, parseContent(row));
+  return (
+    row.kind === 'chat' ||
+    row.kind === 'chat-sdk' ||
+    isCardEvent(row, parseContent(row)) ||
+    isAskAnswer(row, parseContent(row))
+  );
 }
 
 /** A chat row the host wrote as `system` (no person sent it). */
@@ -77,7 +86,7 @@ function senderOf(row: InboundRow): string | null {
   const content = parseContent(row);
   if (!content) return null;
   let id: unknown;
-  if (isCardEvent(row, content)) {
+  if (isCardEvent(row, content) || isAskAnswer(row, content)) {
     const payload = content.payload as { user?: { id?: unknown } } | undefined;
     id = payload?.user?.id;
   } else {

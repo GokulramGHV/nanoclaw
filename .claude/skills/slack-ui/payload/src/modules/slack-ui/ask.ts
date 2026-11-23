@@ -150,8 +150,9 @@ export function buildAskCard(questions: AskSpecQuestion[]): {
     state[`q${i}_text`] = escapeEntities(q.header ? `*${q.header}*\n${q.question}` : q.question);
     state[`q${i}_opts`] = q.options.map((o, j) => ({
       v: String(j),
-      l: escapeEntities(o.label),
-      d: escapeEntities(o.description ?? ''),
+      // plain_text in Slack: no entity escaping (the question and header are mrkdwn, escaped above)
+      l: o.label,
+      d: o.description ?? '',
     }));
     children.push(`s${i}`, `c${i}`);
     lines.push(`s${i} = Section($q${i}_text)`);
@@ -237,6 +238,7 @@ async function ask(content: Obj, session: Session): Promise<void> {
   }
 
   const owner = readInboundSender(session, content.inReplyTo) ?? '';
+  if (!owner && !spec.who) throw new AskError('no one to answer: name who should answer with `who`');
   const { source, state, required } = buildAskCard(spec.questions);
   try {
     await kit.render(source, state);
@@ -266,10 +268,15 @@ export async function handleAsk(content: Obj, session: Session): Promise<void> {
   try {
     await ask(content, session);
   } catch (err) {
-    const reason =
-      err instanceof AskError ||
-      err instanceof CardRenderError ||
-      (err instanceof Error && err.name === 'SlackApiError')
+    const slackCode =
+      err instanceof CardRenderError && typeof err.slackError === 'string' && /^[\w.-]{1,60}$/.test(err.slackError)
+        ? err.slackError
+        : undefined;
+    const reason = slackCode
+      ? `Slack refused the card (${slackCode})`
+      : err instanceof AskError ||
+          err instanceof CardRenderError ||
+          (err instanceof Error && err.name === 'SlackApiError')
         ? shortMessage(err)
         : 'unexpected error (see host log)';
     log.warn('slack-ui: ask failed', { err: err instanceof Error ? err.message : String(err) });

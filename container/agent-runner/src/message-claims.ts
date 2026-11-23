@@ -15,6 +15,13 @@ export const CLAIMS_DIR = '/tmp/nanoclaw-message-claims';
 
 const MAX_NAME_LENGTH = 200;
 
+/**
+ * A claim older than this is stale and ignored: the longest wait is 300 s, plus
+ * 30 s of margin. It covers an MCP process that was killed mid-wait (a `/clear`,
+ * a SIGKILL) and never released its claim.
+ */
+export const CLAIM_TTL_MS = 330_000;
+
 /** Ids with `/`, `..` or any other character cannot reach outside the claims directory. */
 function claimPath(id: string): string {
   let name = Buffer.from(id, 'utf8').toString('base64url');
@@ -31,6 +38,13 @@ export function releaseMessage(id: string): void {
   fs.rmSync(claimPath(id), { force: true });
 }
 
-export function isMessageClaimed(id: string): boolean {
-  return fs.existsSync(claimPath(id));
+export function isMessageClaimed(id: string, now: number = Date.now()): boolean {
+  const file = claimPath(id);
+  try {
+    if (now - fs.statSync(file).mtimeMs <= CLAIM_TTL_MS) return true;
+  } catch {
+    return false;
+  }
+  fs.rmSync(file, { force: true });
+  return false;
 }

@@ -254,6 +254,10 @@ export const ask: McpToolDefinition = {
     const messageId = `ask-${questionId}`;
     // Claim before the card exists, so the answer can never reach the agent first.
     claimMessage(messageId);
+    // The claim is released only when the wait ends without an answer. An answer is
+    // acked below and never shown again, so its claim is left to expire (message-claims.ts):
+    // releasing at once would let the poll loop read the row between its ack check and
+    // its claim check.
     try {
       await writeMessageOut({
         id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -267,34 +271,40 @@ export const ask: McpToolDefinition = {
           inReplyTo: getCurrentInReplyTo(),
         }),
       });
-      log(`ask: ${questionId} (${input.questions.length} question(s))`);
-
-      const deadline = Date.now() + input.timeout * 1000 * askSettings.timeoutScale;
-      while (Date.now() < deadline) {
-        if (context?.signal.aborted) return err('Question cancelled');
-        const row = getMessageIn(messageId);
-        if (row) {
-          markCompleted([row.id]);
-          let payload: Record<string, unknown> = {};
-          try {
-            const content = JSON.parse(row.content) as { payload?: unknown };
-            if (isObj(content.payload)) payload = content.payload;
-          } catch {
-            // fall through: an unreadable answer is reported below
-          }
-          if (typeof payload.failed === 'string')
-            return err(`The question card could not be posted: ${payload.failed}`);
-          if (!Array.isArray(payload.answers)) return err('The answer could not be read.');
-          return ok(answerText(payload));
-        }
-        await sleep(askSettings.pollMs);
-      }
-      return ok(
-        `No answer after ${input.timeout}s. The card stays open; if someone answers later, the answer arrives as a new message.`,
-      );
-    } finally {
+    } catch (e) {
       releaseMessage(messageId);
+      throw e;
     }
+    log(`ask: ${questionId} (${input.questions.length} question(s))`);
+
+    const deadline = Date.now() + input.timeout * 1000 * askSettings.timeoutScale;
+    while (Date.now() < deadline) {
+      if (context?.signal.aborted) break;
+      const row = getMessageIn(messageId);
+      if (row) {
+        markCompleted([row.id]);
+        let payload: Record<string, unknown> = {};
+        try {
+          const content = JSON.parse(row.content) as { payload?: unknown };
+          if (isObj(content.payload)) payload = content.payload;
+        } catch {
+          // fall through: an unreadable answer is reported below
+        }
+        if (typeof payload.failed === 'string') return err(`The question card could not be posted: ${payload.failed}`);
+        if (!Array.isArray(payload.answers)) return err('The answer could not be read.');
+        return ok(answerText(payload));
+      }
+      try {
+        await sleep(askSettings.pollMs, undefined, context ? { signal: context.signal } : undefined);
+      } catch {
+        break; // aborted while waiting
+      }
+    }
+    releaseMessage(messageId);
+    if (context?.signal.aborted) return err('Question cancelled');
+    return ok(
+      `No answer after ${input.timeout}s. The card stays open; if someone answers later, the answer arrives as a new message.`,
+    );
   },
 };
 

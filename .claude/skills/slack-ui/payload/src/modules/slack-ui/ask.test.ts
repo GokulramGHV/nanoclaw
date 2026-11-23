@@ -87,12 +87,26 @@ const content = (over: Record<string, unknown> = {}) => ({
   questions: [question()],
   who: null,
   threadId: null,
-  inReplyTo: null,
+  inReplyTo: 'm-1',
   ...over,
 });
 
 const posts = () => fake.calls.filter((c) => c.method === 'chat.postMessage');
 const rowOf = (n = 0) => JSON.parse(write.mock.calls[n]![2].content);
+
+function seedInbound(
+  rows: Array<{ id: string; seq: number; kind: string; content: object }> = [
+    { id: 'm-1', seq: 2, kind: 'chat', content: { text: 'hi', senderId: 'slack:U9' } },
+  ],
+): void {
+  const db = new Database(path.join(sessDir, 'inbound.db'));
+  db.exec(INBOUND_SCHEMA);
+  const insert = db.prepare(
+    'INSERT INTO messages_in (id, seq, kind, timestamp, "trigger", content) VALUES (?, ?, ?, ?, ?, ?)',
+  );
+  for (const r of rows) insert.run(r.id, r.seq, r.kind, '2026-01-01T00:00:00.000Z', 1, JSON.stringify(r.content));
+  db.close();
+}
 
 beforeEach(async () => {
   await runMigrations(await initTestDb());
@@ -109,6 +123,7 @@ beforeEach(async () => {
   } as never);
   vi.mocked(getSession).mockResolvedValue(session as never);
   vi.mocked(envValue).mockReturnValue('xoxb-secret');
+  seedInbound();
 });
 
 afterEach(async () => {
@@ -165,7 +180,7 @@ describe('buildAskCard', () => {
     expect(json).toContain('Second?');
   });
 
-  it('keeps agent text out of the source and escapes it in state', async () => {
+  it('keeps agent text out of the source; question and header are escaped, option text is not (plain_text)', async () => {
     const evil = question({
       question: 'a & <b> "q" ) ]',
       header: 'H <x>',
@@ -177,7 +192,7 @@ describe('buildAskCard', () => {
     expect(source).not.toContain('<b>');
     expect(state.q0_text).toBe('*H &lt;x&gt;*\na &amp; &lt;b&gt; "q" ) ]');
     expect(state.q0_opts).toEqual([
-      { v: '0', l: 'x") + Evil("', d: '&lt;d&gt;' },
+      { v: '0', l: 'x") + Evil("', d: '<d>' },
       { v: '1', l: 'ok', d: '' },
     ]);
     const out = await kit.render(source, state);
@@ -199,22 +214,7 @@ describe('askAccess', () => {
 });
 
 describe('ask delivery action', () => {
-  function seedOwner(): void {
-    const db = new Database(path.join(sessDir, 'inbound.db'));
-    db.exec(INBOUND_SCHEMA);
-    db.prepare('INSERT INTO messages_in (id, seq, kind, timestamp, "trigger", content) VALUES (?, ?, ?, ?, ?, ?)').run(
-      'm-1',
-      2,
-      'chat',
-      '2026-01-01T00:00:00.000Z',
-      1,
-      JSON.stringify({ text: 'hi', senderId: 'slack:U9' }),
-    );
-    db.close();
-  }
-
   it('posts the card, saves it with ask metadata and the asker as owner', async () => {
-    seedOwner();
     await handleAsk(
       content({ inReplyTo: 'm-1', threadId: 'slack:C123:1699.1', who: { users: ['U2345678'] } }),
       session,
@@ -252,9 +252,12 @@ describe('ask delivery action', () => {
       [
         'slack error',
         () => {
-          fake.postError = Object.assign(new Error('channel_not_found'), { name: 'SlackApiError' });
+          fake.postError = Object.assign(new Error('slack chat.postMessage failed: not_in_channel xoxb-leak'), {
+            name: 'SlackApiError',
+            data: { error: 'not_in_channel' },
+          });
         },
-        "Couldn't show this card",
+        'Slack refused the card (not_in_channel)',
       ],
     ];
     for (const [i, [name, setup, reason]] of cases.entries()) {
@@ -279,6 +282,36 @@ describe('ask delivery action', () => {
       expect(row.payload.failed, name).toContain(reason);
       expect(JSON.stringify(row)).not.toContain('xoxb');
     }
+  });
+
+  it('fails at once when there is no owner and no who, and posts nothing', async () => {
+    await handleAsk(content({ inReplyTo: 'missing' }), session);
+    expect(posts()).toHaveLength(0);
+    expect(rowOf().payload.failed).toContain('no one to answer');
+  });
+
+  it('posts without an owner when who names someone', async () => {
+    await handleAsk(content({ inReplyTo: 'missing', who: { group: 'S1234567' } }), session);
+    expect(posts()).toHaveLength(1);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('takes the owner from an ask_answer row the agent is replying to', async () => {
+    fs.rmSync(path.join(sessDir, 'inbound.db'));
+    seedInbound([
+      {
+        id: 'late-1',
+        seq: 2,
+        kind: 'webhook',
+        content: {
+          source: 'slack-ui',
+          event: 'ask_answer',
+          payload: { questionId: 'q-0', user: { id: 'U7', name: 'bo' }, answers: [] },
+        },
+      },
+    ]);
+    await handleAsk(content({ inReplyTo: 'late-1' }), session);
+    expect((await getCardById('q-1'))?.owner).toBe('U7');
   });
 
   it('a session without a chat fails with a row too', async () => {
