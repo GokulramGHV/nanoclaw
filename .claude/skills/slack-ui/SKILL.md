@@ -57,7 +57,7 @@ zod@4.6.7
 `slack-ui-kit` is not on npm. It installs from a GitHub release tag, pinned to that tag:
 
 ```nc:run effect:external
-pnpm add github:GokulramGHV/slack-ui-kit#v0.1.2
+pnpm add github:GokulramGHV/slack-ui-kit#v0.1.3
 ```
 
 The kit depends on `@openuidev/lang-core`, whose install script is telemetry. pnpm skips it, and it stays skipped: never add `@openuidev/lang-core` to `onlyBuiltDependencies` in `pnpm-workspace.yaml`. The module also sets `OPENUI_TELEMETRY_DISABLED=1` before the kit loads.
@@ -118,9 +118,13 @@ import './post-card.js';
 import './ask.js';
 ```
 
-### Upgrading from the earlier slack-ui
+### Remove the earlier step-1 files
 
-An install made from the earlier step-1 version of this skill has files this version no longer ships: `src/modules/slack-ui/render.ts`, `src/modules/slack-ui/rules.ts`, `src/modules/slack-ui/db/ui-cards.ts` and their tests (`render.test.ts`, `rules.test.ts`, `db/ui-cards.test.ts`). Delete them. Left in place they are dead code and may fail the build or the tests. The directive engine has no removal directive, so this is a manual step.
+An install made from the earlier step-1 version of this skill has files this version no longer ships. Left in place they are dead code and may fail the build or the tests. This deletes them if they are there; on a fresh install it does nothing:
+
+```nc:run
+rm -f src/modules/slack-ui/render.ts src/modules/slack-ui/rules.ts src/modules/slack-ui/db/ui-cards.ts src/modules/slack-ui/render.test.ts src/modules/slack-ui/rules.test.ts src/modules/slack-ui/db/ui-cards.test.ts
+```
 
 The container tool source is mounted into agent containers, so no image rebuild is needed. Restart the host so it loads the module: `bash setup/lib/restart.sh`.
 

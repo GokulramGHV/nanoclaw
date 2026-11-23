@@ -21,12 +21,12 @@ import { log } from '../../log.js';
 import { requestWake } from '../../request-wake.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
-import { getCardById } from './db/kit-cards.js';
+import { getCardById, listOpenAskCards } from './db/kit-cards.js';
 import { isDuplicate, noteEventContext, takeEventContext } from './events.js';
 import { kit, registerCardEventHandler } from './kit.js';
 import { readInboundSender, shortMessage, stripSlack, threadTsFor } from './post-card.js';
 import { slackClientForToken } from './slack-client.js';
-import { escapeEntities } from './template.js';
+import { decodeEntities, escapeEntities } from './template.js';
 
 export const ASK_LIMITS = {
   questions: [1, 4],
@@ -215,6 +215,21 @@ async function writeAskRow(
   if (wake) await requestWake((await getSession(session.id)) ?? session, 'interactive');
 }
 
+/** Close the session's older open questions about the same message. A failure is logged and never blocks. */
+async function closeOlderAsks(client: ReturnType<typeof slackClientForToken>, sessionId: string, inReplyTo: string) {
+  try {
+    for (const old of await listOpenAskCards(sessionId, inReplyTo)) {
+      try {
+        await kit.closeCard(client, old.channel, old.ts, { note: 'Replaced by a newer question.' });
+      } catch (err) {
+        log.warn('slack-ui: could not close an older ask card', { ts: old.ts, err: String(err) });
+      }
+    }
+  } catch (err) {
+    log.warn('slack-ui: could not look up older ask cards', { err: String(err) });
+  }
+}
+
 async function ask(content: Obj, session: Session): Promise<void> {
   const { questionId } = content;
   if (typeof questionId !== 'string' || !QUESTION_ID_RE.test(questionId)) throw new AskError('invalid questionId');
@@ -245,7 +260,10 @@ async function ask(content: Obj, session: Session): Promise<void> {
   } catch (err) {
     throw new AskError(`the question card could not be rendered: ${shortMessage(err)}`);
   }
-  await kit.postCard(slackClientForToken(token), { channel, ...(threadTs ? { threadTs } : {}) }, source, {
+  const client = slackClientForToken(token);
+  const inReplyTo = typeof content.inReplyTo === 'string' && content.inReplyTo ? content.inReplyTo : undefined;
+  if (inReplyTo) await closeOlderAsks(client, session.id, inReplyTo);
+  await kit.postCard(client, { channel, ...(threadTs ? { threadTs } : {}) }, source, {
     owner,
     access: askAccess(spec.who, owner),
     trusted: true,
@@ -259,6 +277,7 @@ async function ask(content: Obj, session: Session): Promise<void> {
       agentGroupId: session.agent_group_id,
       sessionId: session.id,
       instance,
+      ...(inReplyTo ? { inReplyTo } : {}),
       questions: spec.questions.map((q) => ({ question: q.question, options: q.options.map((o) => o.label) })),
     },
   });
@@ -342,7 +361,7 @@ export async function writeAskAnswer(event: CardEvent, _stored?: CardRecord): Pr
   const ctx = takeEventContext(event.card.channel, event.card.ts, event.user);
   const answers = questions.map((q, i) => {
     const other = stateValue(event.state, `q${i}_other`);
-    const otherText = typeof other === 'string' ? other.trim() : '';
+    const otherText = typeof other === 'string' ? decodeEntities(other).trim() : '';
     return {
       question: q.question,
       selected: chosenLabels(stateValue(event.state, `q${i}`), q.options),

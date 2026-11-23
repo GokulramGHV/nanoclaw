@@ -10,6 +10,7 @@ import { log } from '../../log.js';
 import { requestWake } from '../../request-wake.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import { kit, registerCardEventHandler } from './kit.js';
+import { decodeEntities } from './template.js';
 
 /**
  * What the raw Slack payload knows about one event and the card event does not:
@@ -115,11 +116,11 @@ export async function writeCardEvent(event: CardEvent, stored?: CardRecord): Pro
           cardId,
           template: str(event.meta?.template) ?? '',
           control: event.control.id,
-          value: stripDollar(event.control.value ?? null),
-          ...(event.control.labels ? { labels: stripDollar(event.control.labels) } : {}),
+          value: decodeEntities(stripDollar(event.control.value ?? null)),
+          ...(event.control.labels ? { labels: decodeEntities(stripDollar(event.control.labels)) } : {}),
           user: { id: event.user, name: ctx?.userName ?? '' },
-          state: stripDollar(event.state),
-          ...(event.stateLabels ? { stateLabels: stripDollar(event.stateLabels) } : {}),
+          state: decodeEntities(stripDollar(event.state)),
+          ...(event.stateLabels ? { stateLabels: decodeEntities(stripDollar(event.stateLabels)) } : {}),
           locked: event.locked !== undefined,
         },
       }),

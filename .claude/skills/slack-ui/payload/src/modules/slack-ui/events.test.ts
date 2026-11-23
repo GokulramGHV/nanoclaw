@@ -51,6 +51,26 @@ beforeEach(() => {
 });
 
 describe('writeCardEvent', () => {
+  it('decodes entities in state, value, labels and stateLabels, and leaves plain text alone', async () => {
+    await writeCardEvent(
+      event({
+        control: { id: 'go', kind: 'button', value: { $note: 'a &amp; b' }, labels: { $pick: ['Fish &amp; Chips'] } },
+        state: { $pick: ['x'], $note: '&lt;hi&gt; &amp;amp; plain', $list: [{ t: 'R&amp;D' }], $n: 3 },
+        stateLabels: { $pick: ['Fish &amp; Chips'], $one: 'A &amp; B' },
+      }),
+    );
+    const p = JSON.parse(write.mock.calls[0]![2].content).payload;
+    expect(p.value).toEqual({ note: 'a & b' });
+    expect(p.labels).toEqual({ pick: ['Fish & Chips'] });
+    expect(p.state).toEqual({ pick: ['x'], note: '<hi> &amp; plain', list: [{ t: 'R&D' }], n: 3 });
+    expect(p.stateLabels).toEqual({ pick: ['Fish & Chips'], one: 'A & B' });
+  });
+
+  it('leaves typed text without entities unchanged', async () => {
+    await writeCardEvent(event({ state: { $note: 'plain & simple < ok >' } }));
+    expect(JSON.parse(write.mock.calls[0]![2].content).payload.state.note).toBe('plain & simple < ok >');
+  });
+
   it('writes the card_event message in the agent shape, then wakes the session', async () => {
     await writeCardEvent(event());
     expect(write).toHaveBeenCalledTimes(1);

@@ -66,6 +66,20 @@ export class KitCardStore implements CardStore {
   }
 }
 
+/**
+ * Open (unlocked) ask cards of one session that answer the same inbound message, oldest first.
+ * The lock lives in the stored record, so rows are filtered after the query.
+ */
+export async function listOpenAskCards(sessionId: string, inReplyTo: string): Promise<CardRecord[]> {
+  const rows = await getDb().all<KitCardRow>(
+    "SELECT record_json FROM ui_kit_cards WHERE kind = 'ask' AND session_id = ? ORDER BY created_at",
+    sessionId,
+  );
+  return rows
+    .map((r) => JSON.parse(r.record_json) as CardRecord)
+    .filter((c) => !c.locked && metaString(c.meta, 'inReplyTo') === inReplyTo);
+}
+
 /** The card a `post_card` call with this container card id posted, if any. */
 export async function getCardById(cardId: string): Promise<CardRecord | undefined> {
   const row = await getDb().get<KitCardRow>('SELECT record_json FROM ui_kit_cards WHERE card_id = ?', cardId);

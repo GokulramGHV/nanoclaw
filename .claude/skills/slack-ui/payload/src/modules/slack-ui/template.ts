@@ -76,6 +76,21 @@ export function escapeEntities<T>(value: T): T {
   return value;
 }
 
+/**
+ * The reverse of `escapeEntities` for text the agent reads: `&lt;` `&gt;` `&amp;` back to `< > &`, in that
+ * order, once. Strings only, recursively; keys are left alone.
+ */
+export function decodeEntities<T>(value: T): T {
+  if (typeof value === 'string') {
+    return value.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&') as T;
+  }
+  if (Array.isArray(value)) return value.map((v) => decodeEntities(v)) as T;
+  if (isObj(value)) {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, decodeEntities(v)])) as T;
+  }
+  return value;
+}
+
 // ── parse ───────────────────────────────────────────────────────────────────
 
 function checkFieldSpecs(specs: unknown, where: string, problems: string[]): void {

@@ -23,6 +23,8 @@ vi.mock('../../log.js', () => ({ log: { warn: vi.fn(), info: vi.fn(), error: vi.
 const fake = vi.hoisted(() => ({
   calls: [] as Array<{ method: string; args: any }>,
   postError: undefined as unknown,
+  updateError: undefined as unknown,
+  n: 0,
 }));
 vi.mock('./slack-client.js', () => ({
   slackClientForToken: () => ({
@@ -30,9 +32,13 @@ vi.mock('./slack-client.js', () => ({
       postMessage: async (args: unknown) => {
         fake.calls.push({ method: 'chat.postMessage', args });
         if (fake.postError) throw fake.postError;
-        return { ok: true, ts: '1700000000.000200' };
+        return { ok: true, ts: `1700000000.${String(200 + fake.n++).padStart(6, '0')}` };
       },
-      update: async (args: unknown) => (fake.calls.push({ method: 'chat.update', args }), { ok: true }),
+      update: async (args: unknown) => {
+        fake.calls.push({ method: 'chat.update', args });
+        if (fake.updateError) throw fake.updateError;
+        return { ok: true };
+      },
       delete: async () => ({ ok: true }),
       postEphemeral: async () => ({ ok: true }),
     },
@@ -113,6 +119,8 @@ beforeEach(async () => {
   vi.clearAllMocks();
   fake.calls.length = 0;
   fake.postError = undefined;
+  fake.updateError = undefined;
+  fake.n = 0;
   sessDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-ui-ask-'));
   dirs.push(sessDir);
   vi.mocked(sessionDir).mockReturnValue(sessDir);
@@ -320,6 +328,58 @@ describe('ask delivery action', () => {
   });
 });
 
+describe('closing an older ask', () => {
+  const twoMessages = () => {
+    fs.rmSync(path.join(sessDir, 'inbound.db'));
+    seedInbound([
+      { id: 'm-1', seq: 2, kind: 'chat', content: { text: 'hi', senderId: 'slack:U9' } },
+      { id: 'm-2', seq: 4, kind: 'chat', content: { text: 'again', senderId: 'slack:U9' } },
+    ]);
+  };
+  const closedAt = async (id: string) => (await getCardById(id))?.locked;
+  const updates = () => fake.calls.filter((c) => c.method === 'chat.update');
+
+  it('stores the message the ask replies to', async () => {
+    await handleAsk(content(), session);
+    expect((await getCardById('q-1'))?.meta?.inReplyTo).toBe('m-1');
+  });
+
+  it('closes an older open ask for the same message, without an event, then posts the new one', async () => {
+    await handleAsk(content({ questionId: 'q-1' }), session);
+    await handleAsk(content({ questionId: 'q-2' }), session);
+    expect(posts()).toHaveLength(2);
+    expect(await closedAt('q-1')).toMatchObject({ note: 'Replaced by a newer question.' });
+    expect(await closedAt('q-2')).toBeUndefined();
+    expect(JSON.stringify(updates()[0]!.args.blocks)).toContain('Replaced by a newer question.');
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('leaves locked asks and asks for other messages alone', async () => {
+    twoMessages();
+    await handleAsk(content({ questionId: 'q-a' }), session);
+    await handleAsk(content({ questionId: 'q-b', inReplyTo: 'm-2' }), session);
+    await handleAsk(content({ questionId: 'q-c' }), session); // closes q-a
+    expect(await closedAt('q-a')).toBeDefined();
+    expect(await closedAt('q-b')).toBeUndefined();
+    const lockedBefore = await getCardById('q-a');
+    fake.calls.length = 0;
+    await handleAsk(content({ questionId: 'q-d' }), session); // closes q-c only; q-a already locked
+    expect(updates()).toHaveLength(1);
+    expect(await getCardById('q-a')).toEqual(lockedBefore);
+    expect(await closedAt('q-b')).toBeUndefined();
+    expect(await closedAt('q-c')).toBeDefined();
+  });
+
+  it('still posts the new card when closing fails', async () => {
+    await handleAsk(content({ questionId: 'q-1' }), session);
+    fake.updateError = new Error('slack down');
+    await handleAsk(content({ questionId: 'q-2' }), session);
+    expect(posts()).toHaveLength(2);
+    expect(await getCardById('q-2')).toBeDefined();
+    expect(write).not.toHaveBeenCalled();
+  });
+});
+
 describe('ask answer', () => {
   const askEvent = (over: Partial<CardEvent> = {}): CardEvent => ({
     type: 'action',
@@ -381,6 +441,14 @@ describe('ask answer', () => {
     await writeAskAnswer(askEvent({ state: { $q0: '', $q0_other: 'neither', $q1: [] } }));
     expect(rowOf().payload.answers[0]).toEqual({ question: 'Which env?', selected: [], other: 'neither' });
     expect(rowOf().payload.answers[1]).toEqual({ question: 'Which tools?', selected: [] });
+  });
+
+  it('decodes entities in the typed text, leaving plain text alone', async () => {
+    await writeAskAnswer(askEvent({ state: { $q0: '', $q0_other: 'R&amp;D &lt;b&gt;', $q1: [] } }));
+    expect(rowOf().payload.answers[0].other).toBe('R&D <b>');
+    write.mockClear();
+    await writeAskAnswer(askEvent({ state: { $q0: '', $q0_other: 'plain text', $q1: [] } }));
+    expect(rowOf().payload.answers[0].other).toBe('plain text');
   });
 
   it('ignores a duplicate id', async () => {
