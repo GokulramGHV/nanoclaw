@@ -1,10 +1,13 @@
 /**
- * Card templates: load `cards/<name>.json` from an agent group's plugins,
- * validate agent-supplied data against the template's schema, and fill the
- * template into Slack Block Kit. Pure logic — the only I/O is `findTemplate`.
+ * Card templates: load `cards/<name>.json` (version 2) from an agent group's
+ * plugins together with the OpenUI Lang source it names, validate
+ * agent-supplied data against the template's schema, and turn that data into
+ * card state. Pure logic: the only I/O is `findTemplate`.
  */
 import fs from 'node:fs/promises';
 import path from 'node:path';
+
+import type { Access, Rule } from 'slack-ui-kit';
 
 export interface FieldSpec {
   type: 'string' | 'number' | 'boolean' | 'array';
@@ -17,20 +20,18 @@ export interface FieldSpec {
   items?: Record<string, FieldSpec>;
 }
 
-export type ControlRule = {
-  who: 'owner' | 'anyone' | { group: string };
-  submit?: boolean;
-  notify?: boolean;
-};
-
 export interface CardTemplate {
-  version: 1;
-  /** Template name (set by parseTemplate); used as the fallback text when the filled text is empty. */
-  name?: string;
-  text: string;
+  version: 2;
+  /** Template name (set by parseTemplate). */
+  name: string;
+  /** Optional plain fallback text. The kit derives notification text from the card itself. */
+  text?: string;
   data: Record<string, FieldSpec>;
-  controls: Record<string, ControlRule>;
-  blocks: unknown[];
+  access?: Access;
+  /** File name of the OpenUI Lang source, beside the JSON file. */
+  openui: string;
+  /** The OpenUI Lang source (set by findTemplate). */
+  source?: string;
 }
 
 export class TemplateError extends Error {
@@ -42,14 +43,18 @@ export class TemplateError extends Error {
   }
 }
 
+/** A version 1 (JSON block) template. Its message is shown to the agent as is. */
+export class OldTemplateFormatError extends TemplateError {
+  constructor(name: string) {
+    super([`template ${name} uses the old JSON block format; rewrite it in OpenUI Lang (see the slack-ui skill)`]);
+    this.name = 'OldTemplateFormatError';
+  }
+}
+
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const OPENUI_FILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*\.oui$/;
 const DEFAULT_MAX_LENGTH = 3000;
 const DEFAULT_MAX_ITEMS = 50;
-const MAX_BLOCKS = 50;
-const MAX_TEXT = 3000;
-const MAX_MARKDOWN_TEXT = 12000;
-const MAX_CHECKBOX_OPTIONS = 10;
-const MAX_ACTIONS_ELEMENTS = 25;
 
 type Obj = Record<string, unknown>;
 
@@ -61,13 +66,16 @@ function hasOwn(o: object, k: string): boolean {
   return Object.prototype.hasOwnProperty.call(o, k);
 }
 
-/** Same rules as `escapeSlackMrkdwn` in src/channels/slack.ts. */
-export function escapeMrkdwn(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/@(here|channel|everyone)\b/gi, '@\u2060$1');
+/** Entity-escape `& < >`, so card data cannot add Slack markup. Strings only, recursively; keys are left alone. */
+export function escapeEntities<T>(value: T): T {
+  if (typeof value === 'string') {
+    return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') as T;
+  }
+  if (Array.isArray(value)) return value.map((v) => escapeEntities(v)) as T;
+  if (isObj(value)) {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, escapeEntities(v)])) as T;
+  }
+  return value;
 }
 
 // ── parse ───────────────────────────────────────────────────────────────────
@@ -104,62 +112,51 @@ function checkFieldSpecs(specs: unknown, where: string, problems: string[]): voi
   }
 }
 
-function checkControls(controls: unknown, problems: string[]): void {
-  if (!isObj(controls)) {
-    problems.push('controls must be an object');
-    return;
+function isRule(v: unknown): v is Rule {
+  if (v === 'owner' || v === 'anyone') return true;
+  if (!isObj(v)) return false;
+  const keys = Object.keys(v);
+  if (keys.length !== 1) return false;
+  if (keys[0] === 'group') return typeof v.group === 'string' && v.group.length > 0;
+  if (keys[0] === 'users') {
+    return Array.isArray(v.users) && v.users.length > 0 && v.users.every((u) => typeof u === 'string' && u.length > 0);
   }
-  for (const [key, raw] of Object.entries(controls)) {
-    const at = `controls.${key}`;
-    if (!isObj(raw)) {
-      problems.push(`${at} must be an object`);
-      continue;
-    }
-    const who = raw.who;
-    const okWho =
-      who === 'owner' || who === 'anyone' || (isObj(who) && typeof who.group === 'string' && who.group.length > 0);
-    if (!okWho) problems.push(`${at}.who must be "owner", "anyone" or {"group": "<id>"}`);
-    for (const k of ['submit', 'notify'] as const) {
-      if (raw[k] !== undefined && typeof raw[k] !== 'boolean') problems.push(`${at}.${k} must be a boolean`);
-    }
-  }
+  return false;
 }
 
-/** Every `$each` node must sit in an array and carry `$each` (string), `as` (string) and `do`. */
-function checkEach(node: unknown, where: string, inArray: boolean, problems: string[]): void {
-  if (Array.isArray(node)) {
-    node.forEach((m, i) => checkEach(m, `${where}[${i}]`, true, problems));
-    return;
-  }
-  if (!isObj(node)) return;
-  if (hasOwn(node, '$each')) {
-    if (!inArray) problems.push(`${where}: $each is only allowed as an array member`);
-    if (typeof node.$each !== 'string' || typeof node.as !== 'string' || !hasOwn(node, 'do')) {
-      problems.push(`${where}: $each needs string "$each", string "as" and a "do" node`);
-      return;
-    }
-    checkEach(node.do, `${where}.do`, false, problems);
-    return;
-  }
-  for (const [k, v] of Object.entries(node)) checkEach(v, `${where}.${k}`, false, problems);
-}
+const RULE_HELP = '"owner", "anyone", {"group": "<id>"} or {"users": ["<id>", ...]}';
+const ACCESS_RULE_KEYS = ['default', 'buttons', 'inputs', 'feedback', 'forms'] as const;
 
-/**
- * Every `action_id` must be a fixed string. A placeholder would let agent data
- * pick the control name, and so its press rule.
- */
-function checkActionIds(node: unknown, where: string, problems: string[]): void {
-  if (Array.isArray(node)) {
-    node.forEach((m, i) => checkActionIds(m, `${where}[${i}]`, problems));
+function checkAccess(access: unknown, problems: string[]): void {
+  if (!isObj(access)) {
+    problems.push('access must be an object');
     return;
   }
-  if (!isObj(node)) return;
-  for (const [k, v] of Object.entries(node)) {
-    if (k === 'action_id' && typeof v === 'string' && v.includes('{{')) {
-      problems.push(`${where}.action_id must be a fixed string, not filled from data`);
-    } else {
-      checkActionIds(v, `${where}.${k}`, problems);
+  const allowed = new Set<string>([...ACCESS_RULE_KEYS, 'byId', 'lock']);
+  for (const key of Object.keys(access)) {
+    if (!allowed.has(key)) problems.push(`access.${key} is not a known setting`);
+  }
+  for (const key of ACCESS_RULE_KEYS) {
+    if (access[key] !== undefined && !isRule(access[key])) problems.push(`access.${key} must be ${RULE_HELP}`);
+  }
+  if (access.byId !== undefined) {
+    if (!isObj(access.byId)) problems.push('access.byId must be an object');
+    else {
+      for (const [id, rule] of Object.entries(access.byId)) {
+        if (!isRule(rule)) problems.push(`access.byId.${id} must be ${RULE_HELP}`);
+      }
     }
+  }
+  if (access.lock !== undefined) {
+    const lock = access.lock;
+    const ok =
+      lock === 'buttons' ||
+      lock === 'never' ||
+      (isObj(lock) &&
+        Object.keys(lock).length === 1 &&
+        Array.isArray(lock.ids) &&
+        lock.ids.every((i) => typeof i === 'string' && i.length > 0));
+    if (!ok) problems.push('access.lock must be "buttons", "never" or {"ids": ["<control id>", ...]}');
   }
 }
 
@@ -171,26 +168,25 @@ export function parseTemplate(json: string, name: string): CardTemplate {
     throw new TemplateError([`template "${name}" is not valid JSON: ${(err as Error).message}`], { cause: err });
   }
   if (!isObj(raw)) throw new TemplateError([`template "${name}" must be a JSON object`]);
+  if (raw.version === undefined || raw.version === 1) throw new OldTemplateFormatError(name);
 
   const problems: string[] = [];
-  if (raw.version !== 1) problems.push('version must be 1');
-  if (typeof raw.text !== 'string') problems.push('text must be a string');
+  if (raw.version !== 2) problems.push('version must be 2');
+  if (raw.text !== undefined && typeof raw.text !== 'string') problems.push('text must be a string');
   checkFieldSpecs(raw.data ?? {}, 'data', problems);
-  checkControls(raw.controls ?? {}, problems);
-  if (!Array.isArray(raw.blocks)) problems.push('blocks must be an array');
-  else {
-    checkEach(raw.blocks, 'blocks', true, problems);
-    checkActionIds(raw.blocks, 'blocks', problems);
+  if (raw.access !== undefined) checkAccess(raw.access, problems);
+  if (typeof raw.openui !== 'string' || !OPENUI_FILE_RE.test(raw.openui)) {
+    problems.push('openui must be the plain file name of a .oui file beside the template (no folders)');
   }
   if (problems.length > 0) throw new TemplateError(problems.map((p) => `template "${name}": ${p}`));
 
   return {
-    version: 1,
+    version: 2,
     name,
-    text: raw.text as string,
+    ...(typeof raw.text === 'string' ? { text: raw.text } : {}),
     data: (raw.data ?? {}) as Record<string, FieldSpec>,
-    controls: (raw.controls ?? {}) as Record<string, ControlRule>,
-    blocks: raw.blocks as unknown[],
+    ...(raw.access !== undefined ? { access: raw.access as Access } : {}),
+    openui: raw.openui as string,
   };
 }
 
@@ -226,19 +222,30 @@ export async function findTemplate(groupDir: string, name: string): Promise<{ te
       `card template "${name}" is ambiguous: in plugins ${found.map((f) => f.plugin).join(', ')}`,
     ]);
   }
+  const hit = found[0];
   let template: CardTemplate;
   try {
-    template = parseTemplate(found[0].json, name);
+    template = parseTemplate(hit.json, name);
   } catch (err) {
+    if (err instanceof OldTemplateFormatError) throw err;
     if (err instanceof TemplateError) {
       throw new TemplateError(
-        err.problems.map((p) => `${p} (plugin "${found[0].plugin}")`),
+        err.problems.map((p) => `${p} (plugin "${hit.plugin}")`),
         { cause: err.cause ?? err },
       );
     }
     throw err;
   }
-  return { template, path: found[0].path };
+  const sourceFile = path.join(path.dirname(hit.path), template.openui);
+  try {
+    template.source = await fs.readFile(sourceFile, 'utf8');
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    throw new TemplateError([`cannot read ${template.openui} for card template "${name}" (${code ?? 'error'})`], {
+      cause: err,
+    });
+  }
+  return { template, path: hit.path };
 }
 
 // ── validate ────────────────────────────────────────────────────────────────
@@ -292,140 +299,4 @@ export function validateData(t: CardTemplate, data: unknown): Record<string, unk
   const out = validateObject(t.data, data ?? {}, '', problems);
   if (problems.length > 0) throw new TemplateError(problems);
   return out;
-}
-
-// ── fill ────────────────────────────────────────────────────────────────────
-
-const EMPTY = Symbol('empty');
-
-interface FillCtx {
-  /** Options that carried a `$selected` key / whose `$selected` resolved to true. */
-  keyed: WeakSet<object>;
-  selected: WeakSet<object>;
-  initialState: Record<string, string[]>;
-}
-
-function lookup(scope: Obj, dotted: string): unknown {
-  let cur: unknown = scope;
-  for (const seg of dotted.split('.')) {
-    if (!isObj(cur) || !hasOwn(cur, seg)) return undefined;
-    cur = cur[seg];
-  }
-  return cur;
-}
-
-function substitute(s: string, scope: Obj, escape: boolean): string {
-  return s.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_m, p: string) => {
-    const v = lookup(scope, p);
-    const str = typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean' ? String(v) : '';
-    return escape ? escapeMrkdwn(str) : str;
-  });
-}
-
-function isTextObject(n: Obj): n is Obj & { type: 'plain_text' | 'mrkdwn' | 'markdown'; text: string } {
-  return (n.type === 'plain_text' || n.type === 'mrkdwn' || n.type === 'markdown') && typeof n.text === 'string';
-}
-
-function isEach(n: unknown): n is { $each: string; as: string; do: unknown } {
-  return isObj(n) && hasOwn(n, '$each');
-}
-
-function fillArray(arr: unknown[], scope: Obj, ctx: FillCtx): unknown[] {
-  const out: unknown[] = [];
-  for (const member of arr) {
-    if (isEach(member)) {
-      const items = lookup(scope, member.$each);
-      if (!Array.isArray(items)) continue;
-      for (const item of items) {
-        const f = fillNode(member.do, { ...scope, [member.as]: item }, ctx);
-        if (f !== EMPTY) out.push(f);
-      }
-    } else {
-      const f = fillNode(member, scope, ctx);
-      if (f !== EMPTY) out.push(f);
-    }
-  }
-  return out;
-}
-
-function fillObject(node: Obj, scope: Obj, ctx: FillCtx): unknown {
-  if (isTextObject(node)) {
-    const text = substitute(node.text, scope, node.type !== 'plain_text');
-    return text.trim() === '' ? EMPTY : { ...node, text };
-  }
-
-  const out: Obj = {};
-  let keyed = false;
-  let selected = false;
-  for (const [k, v] of Object.entries(node)) {
-    if (k === '$selected') {
-      keyed = true;
-      selected = typeof v === 'string' && lookup(scope, v) === true;
-      continue;
-    }
-    const f = fillNode(v, scope, ctx);
-    if (f === EMPTY) return EMPTY;
-    out[k] = f;
-  }
-
-  if (Array.isArray(out.fields) && out.fields.length === 0) delete out.fields;
-  if (Array.isArray(out.options) && out.options.length === 0) return EMPTY;
-  if (out.type === 'actions' && (!Array.isArray(out.elements) || out.elements.length === 0)) return EMPTY;
-  if (out.type === 'section' && out.text === undefined && out.fields === undefined) return EMPTY;
-
-  if (Array.isArray(out.options) && out.options.some((o) => isObj(o) && ctx.keyed.has(o))) {
-    const picked = out.options.filter((o) => isObj(o) && ctx.selected.has(o));
-    if (picked.length > 0) out.initial_options = picked;
-    if (typeof out.action_id === 'string') {
-      ctx.initialState[out.action_id] = picked.map((o) => String((o as Obj).value));
-    }
-  }
-  if (keyed) {
-    ctx.keyed.add(out);
-    if (selected) ctx.selected.add(out);
-  }
-  return out;
-}
-
-function fillNode(node: unknown, scope: Obj, ctx: FillCtx): unknown {
-  if (typeof node === 'string') return substitute(node, scope, false);
-  if (Array.isArray(node)) return fillArray(node, scope, ctx);
-  if (isObj(node)) return fillObject(node, scope, ctx);
-  return node;
-}
-
-function checkLimits(node: unknown, where: string, problems: string[]): void {
-  if (Array.isArray(node)) {
-    node.forEach((m, i) => checkLimits(m, `${where}[${i}]`, problems));
-    return;
-  }
-  if (!isObj(node)) return;
-  const maxText = node.type === 'markdown' ? MAX_MARKDOWN_TEXT : MAX_TEXT;
-  if (isTextObject(node) && node.text.length > maxText) {
-    problems.push(`${where}: text is ${node.text.length} characters (max ${maxText})`);
-  }
-  if (node.type === 'checkboxes' && Array.isArray(node.options) && node.options.length > MAX_CHECKBOX_OPTIONS) {
-    problems.push(`${where}: ${node.options.length} checkbox options (max ${MAX_CHECKBOX_OPTIONS})`);
-  }
-  if (node.type === 'actions' && Array.isArray(node.elements) && node.elements.length > MAX_ACTIONS_ELEMENTS) {
-    problems.push(`${where}: ${node.elements.length} elements in an actions block (max ${MAX_ACTIONS_ELEMENTS})`);
-  }
-  for (const [k, v] of Object.entries(node)) checkLimits(v, `${where}.${k}`, problems);
-}
-
-export function fillTemplate(
-  t: CardTemplate,
-  data: Record<string, unknown>,
-): { text: string; blocks: unknown[]; initialState: Record<string, string[]> } {
-  const ctx: FillCtx = { keyed: new WeakSet(), selected: new WeakSet(), initialState: {} };
-  const blocks = fillArray(t.blocks, data, ctx);
-  let text = substitute(t.text, data, true);
-  if (text.trim() === '') text = t.name ?? 'card';
-
-  const problems: string[] = [];
-  if (blocks.length > MAX_BLOCKS) problems.push(`${blocks.length} blocks (max ${MAX_BLOCKS})`);
-  checkLimits(blocks, 'blocks', problems);
-  if (problems.length > 0) throw new TemplateError(problems);
-
-  return { text, blocks, initialState: ctx.initialState };
 }

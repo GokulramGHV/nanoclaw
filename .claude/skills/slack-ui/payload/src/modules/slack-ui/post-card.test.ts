@@ -19,59 +19,65 @@ vi.mock('../../request-wake.js', () => ({ requestWake: vi.fn() }));
 vi.mock('../../db/sessions.js', () => ({ getSession: vi.fn() }));
 vi.mock('../../log.js', () => ({ log: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
 
-import { slackCall } from '../../channels/slack-lib.js';
+const fake = vi.hoisted(() => ({
+  calls: [] as Array<{ method: string; args: any }>,
+  postError: undefined as unknown,
+  tokens: [] as string[],
+}));
+vi.mock('./slack-client.js', () => ({
+  slackClientForToken: (token: string) => {
+    fake.tokens.push(token);
+    return {
+      chat: {
+        postMessage: async (args: unknown) => {
+          fake.calls.push({ method: 'chat.postMessage', args });
+          if (fake.postError) throw fake.postError;
+          return { ok: true, ts: '1700000000.000200' };
+        },
+        update: async (args: unknown) => (fake.calls.push({ method: 'chat.update', args }), { ok: true }),
+        delete: async (args: unknown) => (fake.calls.push({ method: 'chat.delete', args }), { ok: true }),
+        postEphemeral: async (args: unknown) => (fake.calls.push({ method: 'chat.postEphemeral', args }), { ok: true }),
+      },
+      views: { open: async () => ({ ok: true }) },
+    };
+  },
+  slackClientForInstance: vi.fn(),
+}));
+
 import { closeDb, initTestDb, runMigrations } from '../../db/index.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { envValue } from '../../env.js';
 import { getDeliveryAction } from '../../delivery.js';
 import { resolveGroupFolderPath } from '../../group-folder.js';
-import { log } from '../../log.js';
 import { INBOUND_SCHEMA } from '../../mailbox/sqlite/schema.js';
 import { sessionDir } from '../../session-manager.js';
 import type { Session } from '../../types.js';
-import { getCard, insertCard, setMessageTs } from './db/ui-cards.js';
+import { getCardById } from './db/kit-cards.js';
 import './index.js';
 import { notifyCardFailure } from './notify.js';
-import { parseTemplate } from './template.js';
 import { handlePostCard, readInboundSender } from './post-card.js';
 
-vi.mock('./db/ui-cards.js', async (orig) => {
-  const actual = await orig<typeof import('./db/ui-cards.js')>();
-  return { ...actual, setMessageTs: vi.fn(actual.setMessageTs) };
-});
-
-const call = vi.mocked(slackCall);
 const notify = vi.mocked(notifyCardFailure);
 
+const oui = `root = Root([hdr, pick, acts])
+$who = ""
+$items = []
+$pick = []
+$choice = ""
+hdr = Section("Hello *" + $who + "*")
+pick = Checkboxes("pick", $pick, @Each($items, "it", Option(it.name, it.name)))
+acts = Actions([go])
+go = Button("Go", Action([@Set($choice, "go")]), "primary")`;
+
 const templateJson = JSON.stringify({
-  version: 1,
-  text: 'Hi {{who}}',
+  version: 2,
   data: {
     who: { type: 'string', required: true },
     items: { type: 'array', items: { name: { type: 'string' }, selected: { type: 'boolean' } } },
   },
-  controls: { go: { who: 'owner', submit: true } },
-  blocks: [
-    { type: 'section', text: { type: 'mrkdwn', text: 'Hello *{{who}}*' } },
-    {
-      type: 'actions',
-      elements: [
-        {
-          type: 'checkboxes',
-          action_id: 'pick',
-          options: [
-            {
-              $each: 'items',
-              as: 'it',
-              do: { text: { type: 'plain_text', text: '{{it.name}}' }, value: '{{it.name}}', $selected: 'it.selected' },
-            },
-          ],
-        },
-        { type: 'button', action_id: 'go', text: { type: 'plain_text', text: 'Go' } },
-      ],
-    },
-  ],
+  access: { byId: { go: 'anyone' } },
+  openui: 'demo-request.oui',
 });
 
 const session: Session = {
@@ -94,6 +100,13 @@ function mkdir(): string {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-ui-pc-'));
   dirs.push(d);
   return d;
+}
+
+function writeTemplate(name: string, json: string, source: string | null = oui, plugin = 'plugin-a'): void {
+  const dir = path.join(groupDir, 'plugins', plugin, 'cards');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `${name}.json`), json);
+  if (source !== null) fs.writeFileSync(path.join(dir, `${name.replace(/\.json$/, '')}.oui`), source);
 }
 
 type SeedRow = { id: string; kind: string; content: string; trigger?: 0 | 1; seq?: number };
@@ -130,13 +143,17 @@ const post = (over: Record<string, unknown> = {}, s: Session = session) =>
     s,
   );
 
+const posts = () => fake.calls.filter((c) => c.method === 'chat.postMessage');
+
 beforeEach(async () => {
   await runMigrations(await initTestDb());
   vi.clearAllMocks();
+  fake.calls.length = 0;
+  fake.tokens.length = 0;
+  fake.postError = undefined;
   groupDir = mkdir();
   sessDir = mkdir();
-  fs.mkdirSync(path.join(groupDir, 'plugins/plugin-a/cards'), { recursive: true });
-  fs.writeFileSync(path.join(groupDir, 'plugins/plugin-a/cards/demo-request.json'), templateJson);
+  writeTemplate('demo-request', templateJson);
   vi.mocked(resolveGroupFolderPath).mockReturnValue(groupDir);
   vi.mocked(sessionDir).mockReturnValue(sessDir);
   vi.mocked(getAgentGroup).mockResolvedValue({ id: 'ag-1', folder: 'g1' } as never);
@@ -146,7 +163,6 @@ beforeEach(async () => {
     platform_id: 'slack:C123',
   } as never);
   vi.mocked(envValue).mockReturnValue('xoxb-secret');
-  call.mockResolvedValue({ ok: true, ts: '1700000000.000200' });
 });
 
 afterEach(async () => {
@@ -161,52 +177,64 @@ describe('registration', () => {
 });
 
 describe('post_card', () => {
-  it('posts to the session channel, records the ts and seeds state from initialState', async () => {
+  it('posts the OpenUI card to the session channel and saves it with host metadata', async () => {
     await post();
-    expect(call).toHaveBeenCalledTimes(1);
-    const [token, method, body] = call.mock.calls[0];
-    expect(token).toBe('xoxb-secret');
-    expect(method).toBe('chat.postMessage');
-    expect(body).toMatchObject({ channel: 'C123', text: 'Hi world' });
+    expect(posts()).toHaveLength(1);
+    const body = posts()[0]!.args;
+    expect(fake.tokens).toEqual(['xoxb-secret']);
+    expect(body).toMatchObject({ channel: 'C123' });
     expect(body).not.toHaveProperty('thread_ts');
-    expect(JSON.stringify((body as any).blocks)).toContain('ncu:card-1:go');
-    const row = await getCard('card-1');
-    expect(row?.messageTs).toBe('1700000000.000200');
-    expect(row?.state).toEqual({ pick: ['a'] });
-    expect(row?.channelId).toBe('C123');
-    expect(row?.instance).toBe('slack');
-    expect(row?.ownerUserId).toBeNull();
+    expect(JSON.stringify(body.blocks)).toContain('Hello *world*');
+    expect(JSON.stringify(body.blocks)).toContain('"action_id":"go"');
+    // No placeholder message: one post, no update.
+    expect(fake.calls.map((c) => c.method)).toEqual(['chat.postMessage']);
+
+    const card = await getCardById('card-1');
+    expect(card).toMatchObject({
+      channel: 'C123',
+      ts: '1700000000.000200',
+      trusted: true,
+      kind: 'openui',
+      access: { byId: { go: 'anyone' } },
+      meta: {
+        kind: 'card',
+        cardId: 'card-1',
+        template: 'demo-request',
+        agentGroupId: 'ag-1',
+        sessionId: 'sess-1',
+        instance: 'slack',
+      },
+    });
+    expect(card?.state).toMatchObject({ $who: 'world', $items: [{ name: 'a', selected: true }] });
     expect(notify).not.toHaveBeenCalled();
   });
 
-  it('inserts the row before posting', async () => {
-    let seen: unknown;
-    call.mockImplementation(async () => {
-      seen = await getCard('card-1');
-      return { ok: true, ts: '1.2' };
-    });
-    await post();
-    expect(seen).toMatchObject({ id: 'card-1', messageTs: null });
+  it('entity-escapes every string in the data, recursively, before it becomes state', async () => {
+    await post({ data: { who: 'a & <b>', items: [{ name: 'x>y & z' }] } });
+    const card = await getCardById('card-1');
+    expect(card?.state.$who).toBe('a &amp; &lt;b&gt;');
+    expect(card?.state.$items).toEqual([{ name: 'x&gt;y &amp; z' }]);
+    expect(JSON.stringify(posts()[0]!.args.blocks)).toContain('a &amp; &lt;b&gt;');
   });
 
   it('uses threadId when it names the same channel', async () => {
     await post({ threadId: 'slack:C123:1699999999.000100' });
-    expect(call.mock.calls[0][2]).toMatchObject({ thread_ts: '1699999999.000100' });
-    expect((await getCard('card-1'))?.threadTs).toBe('1699999999.000100');
+    expect(posts()[0]!.args).toMatchObject({ thread_ts: '1699999999.000100' });
+    expect((await getCardById('card-1'))?.threadTs).toBe('1699999999.000100');
   });
 
   it('ignores a threadId for another channel and falls back to session.thread_id', async () => {
     await post({ threadId: 'slack:C999:1.1' }, { ...session, thread_id: 'slack:C123:1698.5' });
-    expect(call.mock.calls[0][2]).toMatchObject({ thread_ts: '1698.5' });
+    expect(posts()[0]!.args).toMatchObject({ thread_ts: '1698.5' });
   });
 
   it('goes top-level when neither thread matches', async () => {
     await post({ threadId: 'bogus' }, { ...session, thread_id: 'slack:C999:1.1' });
-    expect(call.mock.calls[0][2]).not.toHaveProperty('thread_ts');
-    expect((await getCard('card-1'))?.threadTs).toBeNull();
+    expect(posts()[0]!.args).not.toHaveProperty('thread_ts');
+    expect((await getCardById('card-1'))?.threadTs).toBeUndefined();
   });
 
-  it('uses the instance-specific token', async () => {
+  it('uses the instance-specific token and records the instance', async () => {
     vi.mocked(getMessagingGroup).mockResolvedValue({
       id: 'mg-1',
       channel_type: 'slack',
@@ -215,46 +243,64 @@ describe('post_card', () => {
     } as never);
     await post();
     expect(vi.mocked(envValue)).toHaveBeenCalledWith('SLACK_BOT_TOKEN_X');
-    expect((await getCard('card-1'))?.instance).toBe('other');
+    expect((await getCardById('card-1'))?.meta?.instance).toBe('other');
+  });
+
+  describe('template format', () => {
+    it('refuses a version 1 template with the exact text', async () => {
+      writeTemplate('old', JSON.stringify({ version: 1, text: 't', data: {}, controls: {}, blocks: [] }), null);
+      await post({ template: 'old' });
+      expect(posts()).toHaveLength(0);
+      expect(notify.mock.calls[0]![1]).toBe(
+        'post_card failed: template old uses the old JSON block format; rewrite it in OpenUI Lang (see the slack-ui skill)',
+      );
+    });
+
+    it('treats a template with no version as version 1', async () => {
+      writeTemplate('noversion', JSON.stringify({ data: {}, openui: 'noversion.oui' }), null);
+      await post({ template: 'noversion' });
+      expect(notify.mock.calls[0]![1]).toMatch(/template noversion uses the old JSON block format/);
+    });
+
+    it.each(['../x.oui', 'sub/x.oui', 'x.txt', '..', '', 'a\\b.oui'])('refuses the openui name %j', async (name) => {
+      writeTemplate('bad', JSON.stringify({ version: 2, data: {}, openui: name }), null);
+      await post({ template: 'bad', data: {} });
+      expect(posts()).toHaveLength(0);
+      expect(notify.mock.calls[0]![1]).toMatch(/^post_card failed: .*openui must be the plain file name/);
+    });
+
+    it('refuses a template whose .oui file is missing', async () => {
+      writeTemplate('nofile', JSON.stringify({ version: 2, data: {}, openui: 'nofile.oui' }), null);
+      await post({ template: 'nofile', data: {} });
+      expect(notify.mock.calls[0]![1]).toMatch(/cannot read nofile\.oui/);
+      expect(notify.mock.calls[0]![1]).not.toContain(groupDir);
+    });
+
+    it('refuses a malformed access setting', async () => {
+      writeTemplate(
+        'badaccess',
+        JSON.stringify({ version: 2, data: {}, openui: 'badaccess.oui', access: { buttons: 'nobody' } }),
+      );
+      await post({ template: 'badaccess', data: {} });
+      expect(notify.mock.calls[0]![1]).toMatch(/access\.buttons must be/);
+    });
   });
 
   describe('redelivery', () => {
     it('posts nothing, silently, when the same session already posted it', async () => {
       await post();
-      call.mockClear();
+      fake.calls.length = 0;
       await post();
-      expect(call).not.toHaveBeenCalled();
+      expect(fake.calls).toHaveLength(0);
       expect(notify).not.toHaveBeenCalled();
     });
 
     it('refuses a card id owned by another session', async () => {
       await post();
-      call.mockClear();
+      fake.calls.length = 0;
       await post({}, { ...session, id: 'sess-2' });
-      expect(call).not.toHaveBeenCalled();
+      expect(fake.calls).toHaveLength(0);
       expect(notify.mock.calls[0]![1]).toBe('post_card failed: card id already in use');
-    });
-
-    it('reposts when an earlier attempt left a row without a message ts', async () => {
-      await insertCard({
-        id: 'card-1',
-        agentGroupId: 'ag-1',
-        sessionId: 'sess-1',
-        instance: 'slack',
-        channelId: 'C123',
-        threadTs: null,
-        ownerUserId: null,
-        templateName: 'demo-request',
-        template: parseTemplate(templateJson, 'demo-request'),
-        data: {},
-        state: {},
-      });
-      await post();
-      expect(call).toHaveBeenCalledTimes(1);
-      const row = await getCard('card-1');
-      expect(row?.messageTs).toBe('1700000000.000200');
-      expect(row?.data).toEqual({ who: 'world', items: [{ name: 'a', selected: true }] });
-      expect(notify).not.toHaveBeenCalled();
     });
   });
 
@@ -262,7 +308,7 @@ describe('post_card', () => {
     it('is the sender of the inReplyTo chat message, slack: prefix stripped', async () => {
       seedInbound([{ id: 'm1', kind: 'chat', content: JSON.stringify({ text: 'x', senderId: 'slack:U42' }) }]);
       await post({ inReplyTo: 'm1' });
-      expect((await getCard('card-1'))?.ownerUserId).toBe('U42');
+      expect((await getCardById('card-1'))?.owner).toBe('U42');
     });
 
     it('is the clicker for a slack-ui card_event webhook row', async () => {
@@ -274,36 +320,38 @@ describe('post_card', () => {
         },
       ]);
       await post({ inReplyTo: 'm2' });
-      expect((await getCard('card-1'))?.ownerUserId).toBe('U77');
+      expect((await getCardById('card-1'))?.owner).toBe('U77');
     });
 
     it('skips a context row from someone else and takes the next triggering sender', async () => {
       seedInbound([chatRow('ctx', 'slack:UY', { trigger: 0 }), chatRow('trig', 'slack:UX')]);
       await post({ inReplyTo: 'ctx' });
-      expect((await getCard('card-1'))?.ownerUserId).toBe('UX');
+      expect((await getCardById('card-1'))?.owner).toBe('UX');
     });
 
     it('is the triggering row sender when inReplyTo is that row', async () => {
       seedInbound([chatRow('ctx', 'slack:UY', { trigger: 0 }), chatRow('trig', 'slack:UX')]);
       await post({ inReplyTo: 'trig' });
-      expect((await getCard('card-1'))?.ownerUserId).toBe('UX');
+      expect((await getCardById('card-1'))?.owner).toBe('UX');
     });
 
-    it('is null when no triggering row follows a context row', async () => {
+    it('is empty (matches nobody) when no triggering row follows a context row', async () => {
       seedInbound([chatRow('old', 'slack:UX'), chatRow('ctx', 'slack:UY', { trigger: 0 })]);
       await post({ inReplyTo: 'ctx' });
-      expect((await getCard('card-1'))?.ownerUserId).toBeNull();
+      expect(posts()).toHaveLength(1);
+      expect((await getCardById('card-1'))?.owner).toBe('');
     });
 
-    it('is null without inReplyTo', async () => {
+    it('is empty without inReplyTo, and the card still posts', async () => {
       await post();
-      expect((await getCard('card-1'))?.ownerUserId).toBeNull();
+      expect(posts()).toHaveLength(1);
+      expect((await getCardById('card-1'))?.owner).toBe('');
     });
   });
 
   describe('errors become a notice and nothing is posted', () => {
     const failed = (re: RegExp) => {
-      expect(call).not.toHaveBeenCalled();
+      expect(posts()).toHaveLength(0);
       expect(notify).toHaveBeenCalledTimes(1);
       expect(notify.mock.calls[0][1]).toMatch(/^post_card failed: /);
       expect(notify.mock.calls[0][1]).toMatch(re);
@@ -344,7 +392,7 @@ describe('post_card', () => {
     it('invalid data', async () => {
       await post({ data: { who: 'w', extra: 1 } });
       failed(/extra/);
-      expect(await getCard('card-1')).toBeUndefined();
+      expect(await getCardById('card-1')).toBeUndefined();
     });
 
     it('bad cardId', async () => {
@@ -364,48 +412,40 @@ describe('post_card', () => {
     });
   });
 
-  it('a Slack error deletes the row and notifies the agent', async () => {
+  it("a Slack error saves nothing and notifies the agent with Slack's code", async () => {
     const { SlackApiError } =
       await vi.importActual<typeof import('../../channels/slack-lib.js')>('../../channels/slack-lib.js');
-    call.mockRejectedValue(new SlackApiError('post_card', 'slack chat.postMessage failed: channel_not_found'));
+    fake.postError = Object.assign(new SlackApiError('post_card', 'slack chat.postMessage failed: channel_not_found'), {
+      data: { error: 'channel_not_found' },
+    });
     await post();
-    expect(await getCard('card-1')).toBeUndefined();
-    expect(notify.mock.calls[0]![1]).toBe('post_card failed: slack chat.postMessage failed: channel_not_found');
+    expect(await getCardById('card-1')).toBeUndefined();
+    expect(notify.mock.calls[0]![1]).toMatch(/^post_card failed: .*channel_not_found/);
   });
 
-  it('keeps the row and does not notify when saving the ts fails once', async () => {
-    const save = vi.mocked(setMessageTs);
-    save.mockRejectedValueOnce(new Error('db busy'));
+  it('a rejected card (invalid_blocks) becomes the kit text in the notice', async () => {
+    fake.postError = Object.assign(new Error('slack chat.postMessage failed: invalid_blocks'), {
+      data: { error: 'invalid_blocks' },
+    });
     await post();
-    expect(save).toHaveBeenCalledTimes(2);
-    expect((await getCard('card-1'))?.messageTs).toBe('1700000000.000200');
-    expect(notify).not.toHaveBeenCalled();
-    expect(vi.mocked(log.error)).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.objectContaining({ cardId: 'card-1', ts: '1700000000.000200' }),
-    );
-  });
-
-  it('keeps the row and does not notify when saving the ts fails twice', async () => {
-    vi.mocked(setMessageTs).mockRejectedValueOnce(new Error('db gone')).mockRejectedValueOnce(new Error('db gone'));
-    await post();
-    expect(await getCard('card-1')).toBeDefined();
-    expect(notify).not.toHaveBeenCalled();
+    expect(await getCardById('card-1')).toBeUndefined();
+    expect(notify.mock.calls[0]![1]).toMatch(/^post_card failed: .+/);
+    expect(notify.mock.calls[0]![1]).not.toBe('post_card failed: unexpected error (see host log)');
   });
 
   it('an unexpected error is hidden behind a generic notice and never thrown', async () => {
-    call.mockRejectedValue(new Error('secret xoxb-secret leaked'));
+    vi.mocked(envValue).mockImplementation(() => {
+      throw new Error('secret xoxb-secret leaked');
+    });
     await expect(post()).resolves.toBeUndefined();
-    expect(await getCard('card-1')).toBeUndefined();
     expect(notify.mock.calls[0][1]).toBe('post_card failed: unexpected error (see host log)');
   });
 
   it('passes the message the card answered to the failure notice', async () => {
-    call.mockRejectedValue(new Error('boom'));
-    await post({ inReplyTo: 'msg-9' });
+    await post({ template: 'nope', inReplyTo: 'msg-9' });
     expect(notify.mock.calls[0]![2]).toBe('msg-9');
     notify.mockClear();
-    await post({ cardId: 'card-2', inReplyTo: 42 });
+    await post({ template: 'nope', cardId: 'card-2', inReplyTo: 42 });
     expect(notify.mock.calls[0]![2]).toBeUndefined();
   });
 

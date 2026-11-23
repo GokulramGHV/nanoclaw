@@ -1,8 +1,11 @@
 /**
- * slack-ui module: interactive Slack cards from JSON templates.
- * Importing this file runs the migrations, the click handler registration
- * and the `post_card` delivery action registration.
+ * slack-ui module: interactive Slack cards on slack-ui-kit, from OpenUI Lang
+ * templates. Importing this file runs the migrations, the click and form
+ * handler registrations and the `post_card` delivery action registration.
  */
+import './telemetry.js';
 import './db/migrations.js';
+import './events.js';
 import './clicks.js';
+import './forms.js';
 import './post-card.js';

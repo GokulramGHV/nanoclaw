@@ -1,258 +1,87 @@
 /**
- * Click handling for `ncu:` cards: who may press, locking on submit, and
- * telling the agent. Order matters: load the card, check the rule (a group
- * rule may call Slack), `tryLock` for a submit control, then the agent
- * message, then any Slack update. The agent message goes first so a failed
- * or slow redraw can never lose a submit. Nothing is awaited between
- * `tryLock` and the decision to refuse the loser.
+ * Clicks on kit cards. Registered with the chat bridge as a question action
+ * handler: it claims only presses on cards the kit store holds for this Slack
+ * app instance and passes everything else on. Presses on cards of the old
+ * `ncu:` format get a private "no longer active" note. Never throws to the
+ * bridge.
  */
 import type { ActionEvent, Adapter } from 'chat';
 
 import { registerQuestionActionHandler } from '../../channels/question-render-registry.js';
-import { botTokenKeyForInstance, slackCall } from '../../channels/slack-lib.js';
-import { getSession } from '../../db/sessions.js';
-import { envValue } from '../../env.js';
 import { log } from '../../log.js';
-import { requestWake } from '../../request-wake.js';
-import { writeSessionMessage } from '../../session-manager.js';
-import { getCard, setMessageTs, tryLock, updateState, updateStateIfUnlocked, type UiCard } from './db/ui-cards.js';
-import { mergeState, parseActionId, renderCard, stateFromPayload, type CardState } from './render.js';
-import { canPress, createGroupCache, refusalText, ruleFor } from './rules.js';
+import { kit, recoverKitError } from './kit.js';
+import { slackClientForInstance } from './slack-client.js';
 
 type Obj = Record<string, unknown>;
 
-const NO_LONGER_ACTIVE = 'This card is no longer active.';
-const ALREADY_SUBMITTED = 'This was already submitted.';
-
-const groupCaches = new Map<string, (groupId: string) => Promise<string[]>>();
-
-function groupMembersFor(token: string): (groupId: string) => Promise<string[]> {
-  let cache = groupCaches.get(token);
-  if (!cache) {
-    cache = createGroupCache(token);
-    groupCaches.set(token, cache);
-  }
-  return cache;
-}
+export const NO_LONGER_ACTIVE = 'This card is no longer active.';
 
 function isObj(v: unknown): v is Obj {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-function errMsg(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+function str(v: unknown): string | undefined {
+  return typeof v === 'string' && v !== '' ? v : undefined;
 }
 
-/** Keep only the payload entries whose action id belongs to `cardId`. */
-function ownPayload(raw: unknown, cardId: string): unknown {
-  if (!isObj(raw)) return {};
-  const mine = (id: unknown): boolean => typeof id === 'string' && parseActionId(id)?.cardId === cardId;
-  const out: Obj = {};
-  if (Array.isArray(raw.actions)) {
-    out.actions = raw.actions.filter((a) => isObj(a) && mine(a.action_id));
-  }
-  if (isObj(raw.state) && isObj(raw.state.values)) {
-    const values: Obj = {};
-    for (const [blockId, block] of Object.entries(raw.state.values)) {
-      if (!isObj(block)) continue;
-      values[blockId] = Object.fromEntries(Object.entries(block).filter(([id]) => mine(id)));
-    }
-    out.state = { values };
-  }
-  return out;
+/** Channel and message ts of the message a press came from. */
+export function locateMessage(raw: unknown): { channel: string; ts: string } | undefined {
+  if (!isObj(raw)) return undefined;
+  const container = isObj(raw.container) ? raw.container : {};
+  const channelObj = isObj(raw.channel) ? raw.channel : {};
+  const message = isObj(raw.message) ? raw.message : {};
+  const channel = str(container.channel_id) ?? str(channelObj.id);
+  const ts = str(container.message_ts) ?? str(message.ts);
+  return channel && ts ? { channel, ts } : undefined;
 }
 
-async function ephemeral(
-  token: string,
-  channel: string,
-  user: string,
-  threadTs: string | undefined,
-  text: string,
-): Promise<void> {
+async function tellNoLongerActive(event: ActionEvent, instance: string): Promise<void> {
+  const client = slackClientForInstance(instance);
+  const raw = isObj(event.raw) ? event.raw : {};
+  const channel = locateMessage(raw)?.channel ?? (isObj(raw.channel) ? str(raw.channel.id) : undefined);
+  const user = event.user?.userId;
+  if (!client || !channel || !user) return;
+  const container = isObj(raw.container) ? raw.container : {};
+  const threadTs = str(container.thread_ts);
   try {
-    await slackCall(token, 'chat.postEphemeral', { channel, user, text, thread_ts: threadTs }, 'slack-ui-ephemeral');
-  } catch (err) {
-    log.warn('slack-ui: ephemeral failed', { err: errMsg(err) });
-  }
-}
-
-/**
- * Redraw the card from stored state. A card whose ts was never saved uses the
- * message ts from the press payload and saves it for next time.
- */
-async function redraw(token: string, card: UiCard, raw: Obj): Promise<void> {
-  let ts = card.messageTs;
-  if (!ts) {
-    const fromPress = isObj(raw.container) ? raw.container.message_ts : undefined;
-    if (typeof fromPress !== 'string' || fromPress === '') return;
-    ts = fromPress;
-    try {
-      await setMessageTs(card.id, ts);
-    } catch (err) {
-      log.warn('slack-ui: saving message ts from a press failed', { card: card.id, err: errMsg(err) });
-    }
-  }
-  try {
-    const { text, blocks } = renderCard(card);
-    await slackCall(token, 'chat.update', { channel: card.channelId, ts, text, blocks }, 'slack-ui-update');
-  } catch (err) {
-    log.warn('slack-ui: chat.update failed', { card: card.id, err: errMsg(err) });
-  }
-}
-
-function isDuplicate(err: unknown): boolean {
-  const code = isObj(err) ? err.code : undefined;
-  const msg = errMsg(err);
-  return code === 'SQLITE_CONSTRAINT_PRIMARYKEY' || msg.includes('UNIQUE') || msg.includes('PRIMARY KEY');
-}
-
-/** The payload entry for the pressed control, else the first entry. */
-function clickedAction(raw: Obj, actionId: string): Obj | undefined {
-  const actions = Array.isArray(raw.actions) ? raw.actions : [];
-  const found = actions.find((a) => isObj(a) && a.action_id === actionId) ?? actions[0];
-  return isObj(found) ? found : undefined;
-}
-
-async function notifyAgent(
-  card: UiCard,
-  control: string,
-  merged: CardState,
-  event: ActionEvent,
-  raw: Obj,
-  userId: string,
-  locked: boolean,
-): Promise<void> {
-  const clicked = clickedAction(raw, event.actionId);
-  const rawValue = clicked && typeof clicked.value === 'string' ? clicked.value : null;
-  const value = Object.prototype.hasOwnProperty.call(merged, control) ? merged[control] : rawValue;
-  const session = await getSession(card.sessionId);
-  if (!session) {
-    log.error('slack-ui: card session missing, no agent message sent', { card: card.id, session: card.sessionId });
-    return;
-  }
-  // Slack puts action_ts on each entry of actions[], not on the payload. It
-  // keys the message id, so a redelivered press is written once.
-  const actionTs =
-    clicked && typeof clicked.action_ts === 'string' && clicked.action_ts ? clicked.action_ts : String(Date.now());
-  try {
-    await writeSessionMessage(card.agentGroupId, card.sessionId, {
-      id: `card-${card.id}-${actionTs}`,
-      kind: 'webhook',
-      timestamp: new Date().toISOString(),
-      platformId: `slack:${card.channelId}`,
-      channelType: 'slack',
-      threadId: card.threadTs ? `slack:${card.channelId}:${card.threadTs}` : null,
-      content: JSON.stringify({
-        source: 'slack-ui',
-        event: 'card_event',
-        payload: {
-          cardId: card.id,
-          template: card.templateName,
-          control,
-          value,
-          user: { id: userId, name: event.user.userName || event.user.fullName || '' },
-          state: merged,
-          locked,
-        },
-      }),
+    await client.chat.postEphemeral({
+      channel,
+      user,
+      text: NO_LONGER_ACTIVE,
+      ...(threadTs ? { thread_ts: threadTs } : {}),
     });
   } catch (err) {
-    if (isDuplicate(err)) {
-      log.debug('slack-ui: duplicate click delivery ignored', { card: card.id });
-    } else {
-      log.error('slack-ui: writing card event failed', { card: card.id, err: errMsg(err) });
-    }
-    return;
+    log.warn('slack-ui: ephemeral failed', { err: err instanceof Error ? err.message : String(err) });
   }
-  const fresh = (await getSession(card.sessionId)) ?? session;
-  await requestWake(fresh, 'interactive');
 }
 
-export async function handleCardAction(event: ActionEvent, _adapter: Adapter, instance: string): Promise<boolean> {
-  const parsed = parseActionId(event.actionId);
-  if (!parsed) return false;
-  const { cardId, control } = parsed;
-
-  const token = envValue(botTokenKeyForInstance(instance));
-  if (!token) {
-    log.error('slack-ui: no bot token for instance', { instance });
-    return true;
-  }
-
-  const raw: Obj = isObj(event.raw) ? event.raw : {};
-  const userId = event.user.userId;
-
+export async function handleKitAction(event: ActionEvent, _adapter: Adapter, instance: string): Promise<boolean> {
   try {
-    const card = await getCard(cardId);
-    if (!card || card.instance !== instance) {
-      const channel = isObj(raw.channel) && typeof raw.channel.id === 'string' ? raw.channel.id : undefined;
-      const threadTs =
-        isObj(raw.container) && typeof raw.container.thread_ts === 'string' ? raw.container.thread_ts : undefined;
-      if (channel) await ephemeral(token, channel, userId, threadTs, NO_LONGER_ACTIVE);
+    if (event.actionId.startsWith('ncu:')) {
+      await tellNoLongerActive(event, instance);
       return true;
     }
-    const threadTs = card.threadTs ?? undefined;
+    const at = locateMessage(event.raw);
+    if (!at) return false;
+    const card = await kit.getCard(at.channel, at.ts);
+    if (!card) return false;
+    if (card.meta?.instance !== instance) return false;
 
-    if (card.locked) {
-      await ephemeral(token, card.channelId, userId, threadTs, ALREADY_SUBMITTED);
-      return true;
-    }
-
-    const rule = ruleFor(card.template, control);
-    if (!(await canPress(rule, userId, card.ownerUserId, groupMembersFor(token)))) {
-      await ephemeral(token, card.channelId, userId, threadTs, refusalText(rule, card.ownerUserId));
-      await redraw(token, card, raw);
-      return true;
-    }
-
-    // A press may only change the stored value of controls this user may press.
-    const groupMembers = groupMembersFor(token);
-    const payloadState = stateFromPayload(ownPayload(raw, cardId));
-    const allowedState: CardState = {};
-    for (const [name, v] of Object.entries(payloadState)) {
-      if (await canPress(ruleFor(card.template, name), userId, card.ownerUserId, groupMembers)) allowedState[name] = v;
-    }
-    const merged = mergeState(card.state as CardState, allowedState);
-
-    if (!rule.submit) {
-      if (!(await updateStateIfUnlocked(card.id, merged))) {
-        await ephemeral(token, card.channelId, userId, threadTs, ALREADY_SUBMITTED);
-        return true;
-      }
-      const isButton = clickedAction(raw, event.actionId)?.type === 'button';
-      if (rule.notify ?? isButton) await notifyAgent(card, control, merged, event, raw, userId, false);
-      return true;
-    }
-
-    if (!(await tryLock(card.id, userId))) {
-      await ephemeral(token, card.channelId, userId, threadTs, ALREADY_SUBMITTED);
+    const client = slackClientForInstance(instance);
+    if (!client) {
+      log.error('slack-ui: no bot token for instance', { instance });
       return true;
     }
     try {
-      await updateState(card.id, merged);
+      await kit.handleAction(client, event.raw);
     } catch (err) {
-      log.error('slack-ui: saving state after lock failed', { card: card.id, err: errMsg(err) });
+      await recoverKitError(err);
     }
-    const lockedCard: UiCard = {
-      ...card,
-      state: merged,
-      locked: true,
-      lockedBy: userId,
-      lockedAt: new Date().toISOString(),
-    };
-    if (rule.notify !== false) {
-      try {
-        await notifyAgent(card, control, merged, event, raw, userId, true);
-      } catch (err) {
-        log.error('slack-ui: telling the agent about a submit failed', { card: card.id, err: errMsg(err) });
-      }
-    }
-    await redraw(token, lockedCard, raw);
     return true;
   } catch (err) {
-    log.error('slack-ui: card action failed', { card: cardId, err: errMsg(err) });
+    log.error('slack-ui: card action failed', { err: err instanceof Error ? err.message : String(err) });
     return true;
   }
 }
 
-registerQuestionActionHandler(handleCardAction);
+registerQuestionActionHandler(handleKitAction);

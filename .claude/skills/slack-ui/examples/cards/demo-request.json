@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "data": {
+    "title": { "type": "string", "required": true, "maxLength": 150 },
+    "items": { "type": "array", "maxItems": 10, "items": {
+      "name": { "type": "string", "required": true, "maxLength": 60 } } }
+  },
+  "access": { "byId": { "pick": "owner", "create": "owner" } },
+  "openui": "demo-request.oui"
+}

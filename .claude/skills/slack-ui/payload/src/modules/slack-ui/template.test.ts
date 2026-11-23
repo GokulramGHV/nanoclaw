@@ -5,246 +5,38 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   type CardTemplate,
+  OldTemplateFormatError,
   TemplateError,
-  escapeMrkdwn,
-  fillTemplate,
+  escapeEntities,
   findTemplate,
   parseTemplate,
   validateData,
 } from './template.js';
 
 function tpl(over: Partial<CardTemplate> = {}): CardTemplate {
-  return { version: 1, name: 'demo-request', text: 'hi', data: {}, controls: {}, blocks: [], ...over };
+  return { version: 2, name: 'demo-request', data: {}, openui: 'demo-request.oui', ...over };
 }
 
-const section = (text: string) => ({ type: 'section', text: { type: 'mrkdwn', text } });
-
-describe('fillTemplate', () => {
-  it('expands $each into options with substituted values', () => {
-    const t = tpl({
-      blocks: [
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'checkboxes',
-              action_id: 'pick',
-              options: [
-                {
-                  $each: 'items',
-                  as: 'it',
-                  do: { text: { type: 'plain_text', text: '{{it.name}} ({{it.count}})' }, value: '{{it.name}}' },
-                },
-              ],
-            },
-          ],
-        },
-      ],
+describe('escapeEntities', () => {
+  it('escapes & < > in strings, arrays and objects, recursively', () => {
+    expect(escapeEntities({ a: 'x & <y>', n: [{ b: '>' }, 'ok'], k: 1, t: true })).toEqual({
+      a: 'x &amp; &lt;y&gt;',
+      n: [{ b: '&gt;' }, 'ok'],
+      k: 1,
+      t: true,
     });
-    const out = fillTemplate(t, { items: [{ name: 'a', count: 2 }, { name: 'b' }] });
-    const opts = ((out.blocks[0] as any).elements[0] as any).options;
-    expect(opts).toEqual([
-      { text: { type: 'plain_text', text: 'a (2)' }, value: 'a' },
-      { text: { type: 'plain_text', text: 'b ()' }, value: 'b' },
-    ]);
-    expect(out.initialState).toEqual({});
   });
 
-  it('supports nested $each', () => {
-    const t = tpl({
-      blocks: [
-        {
-          $each: 'groups',
-          as: 'g',
-          do: {
-            type: 'section',
-            fields: [{ $each: 'g.rows', as: 'r', do: { type: 'mrkdwn', text: '{{g.title}}:{{r.v}}' } }],
-          },
-        },
-      ],
-    });
-    const out = fillTemplate(t, {
-      groups: [
-        { title: 'x', rows: [{ v: '1' }, { v: '2' }] },
-        { title: 'y', rows: [{ v: '3' }] },
-      ],
-    });
-    expect((out.blocks as any[]).map((b) => b.fields.map((f: any) => f.text))).toEqual([['x:1', 'x:2'], ['y:3']]);
+  it('escapes the ampersand first, so an existing entity is escaped once more, not merged', () => {
+    expect(escapeEntities('&lt;')).toBe('&amp;lt;');
   });
 
-  it('turns $selected into initial_options and initialState, dropping the key', () => {
-    const t = tpl({
-      blocks: [
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'checkboxes',
-              action_id: 'pick',
-              options: [
-                {
-                  $each: 'items',
-                  as: 'it',
-                  do: {
-                    text: { type: 'plain_text', text: '{{it.name}}' },
-                    value: '{{it.name}}',
-                    $selected: 'it.selected',
-                  },
-                },
-              ],
-            },
-          ],
-        },
-      ],
-    });
-    const out = fillTemplate(t, {
-      items: [
-        { name: 'a', selected: true },
-        { name: 'b', selected: false },
-        { name: 'c', selected: true },
-      ],
-    });
-    const el = (out.blocks[0] as any).elements[0];
-    expect(el.options).toHaveLength(3);
-    expect(el.initial_options.map((o: any) => o.value)).toEqual(['a', 'c']);
-    expect(JSON.stringify(out.blocks)).not.toContain('$selected');
-    expect(out.initialState).toEqual({ pick: ['a', 'c'] });
-  });
-
-  it('records an empty state when nothing is selected, and omits initial_options', () => {
-    const t = tpl({
-      blocks: [
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'checkboxes',
-              action_id: 'pick',
-              options: [{ text: { type: 'plain_text', text: 'x' }, value: 'x', $selected: 'missing.path' }],
-            },
-          ],
-        },
-      ],
-    });
-    const out = fillTemplate(t, {});
-    expect((out.blocks[0] as any).elements[0].initial_options).toBeUndefined();
-    expect(out.initialState).toEqual({ pick: [] });
-  });
-
-  it('escapes substituted values in mrkdwn and fallback text only', () => {
-    const t = tpl({
-      text: 'T {{v}}',
-      blocks: [
-        section('*{{v}}* <b>'),
-        { type: 'header', text: { type: 'plain_text', text: '{{v}}' } },
-        {
-          type: 'actions',
-          elements: [{ type: 'button', action_id: 'go', text: { type: 'plain_text', text: 'Go' }, value: '{{v}}' }],
-        },
-      ],
-    });
-    const v = '<!channel> & @here @HERE <@U1>';
-    const out = fillTemplate(t, { v });
-    const escaped = '&lt;!channel&gt; &amp; @\u2060here @\u2060HERE &lt;@U1&gt;';
-    expect((out.blocks[0] as any).text.text).toBe(`*${escaped}* <b>`);
-    expect((out.blocks[1] as any).text.text).toBe(v);
-    expect((out.blocks[2] as any).elements[0].value).toBe(v);
-    expect(out.text).toBe(`T ${escaped}`);
-    expect(escapeMrkdwn(v)).toBe(escaped);
-  });
-
-  it('escapes substituted values in markdown blocks', () => {
-    const out = fillTemplate(tpl({ blocks: [{ type: 'markdown', text: 'x {{v}}' }] }), { v: '<!channel>' });
-    expect((out.blocks[0] as any).text).toBe('x &lt;!channel&gt;');
-  });
-
-  it('caps markdown block text at 12000 characters', () => {
-    const md = () => tpl({ blocks: [{ type: 'markdown', text: '{{v}}' }] });
-    expect(() => fillTemplate(md(), { v: 'x'.repeat(12000) })).not.toThrow();
-    expect(() => fillTemplate(md(), { v: 'x'.repeat(12001) })).toThrow(/12001/);
-  });
-
-  it('removes the block holding an empty text, and cascades to emptied containers', () => {
-    const t = tpl({
-      blocks: [
-        section('{{a}}'),
-        section('keep'),
-        {
-          type: 'actions',
-          elements: [
-            {
-              type: 'checkboxes',
-              action_id: 'pick',
-              options: [
-                { $each: 'items', as: 'it', do: { text: { type: 'plain_text', text: '{{it.name}}' }, value: 'v' } },
-              ],
-            },
-          ],
-        },
-        { type: 'section', fields: [{ type: 'mrkdwn', text: '{{a}}' }] },
-      ],
-    });
-    const out = fillTemplate(t, { a: '  ', items: [{ name: '' }] });
-    expect(out.blocks).toEqual([section('keep')]);
-  });
-
-  it('removes only the empty field and keeps the rest of a section', () => {
-    const t = tpl({
-      blocks: [
-        {
-          type: 'section',
-          text: { type: 'mrkdwn', text: 'hello' },
-          fields: [
-            { type: 'mrkdwn', text: '{{a}}' },
-            { type: 'mrkdwn', text: '{{b}}' },
-          ],
-        },
-      ],
-    });
-    const out = fillTemplate(t, { a: '', b: 'B' });
-    expect((out.blocks[0] as any).fields).toEqual([{ type: 'mrkdwn', text: 'B' }]);
-  });
-
-  it('uses the template name when the filled fallback text is empty', () => {
-    const out = fillTemplate(tpl({ text: '{{t}}' }), { t: '' });
-    expect(out.text).toBe('demo-request');
-  });
-
-  it('does not mutate the template', () => {
-    const t = tpl({ blocks: [section('{{v}}')] });
-    const before = JSON.stringify(t);
-    fillTemplate(t, { v: 'x' });
-    expect(JSON.stringify(t)).toBe(before);
-  });
-
-  it('rejects over-limit output', () => {
-    expect(() => fillTemplate(tpl({ blocks: Array.from({ length: 51 }, () => section('x')) }), {})).toThrow(
-      TemplateError,
-    );
-    expect(() => fillTemplate(tpl({ blocks: [section('{{v}}')] }), { v: 'x'.repeat(3001) })).toThrow(/3001/);
-    const boxes = {
-      type: 'actions',
-      elements: [
-        {
-          type: 'checkboxes',
-          action_id: 'p',
-          options: Array.from({ length: 11 }, (_, i) => ({
-            text: { type: 'plain_text', text: `o${i}` },
-            value: `${i}`,
-          })),
-        },
-      ],
-    };
-    expect(() => fillTemplate(tpl({ blocks: [boxes] }), {})).toThrow(/checkbox/);
-    const buttons = {
-      type: 'actions',
-      elements: Array.from({ length: 26 }, (_, i) => ({
-        type: 'button',
-        action_id: `b${i}`,
-        text: { type: 'plain_text', text: 'b' },
-      })),
-    };
-    expect(() => fillTemplate(tpl({ blocks: [buttons] }), {})).toThrow(/actions block/);
+  it('leaves keys and non-strings alone and does not mutate the input', () => {
+    const input = { 'a&b': 'x', list: ['<'] };
+    escapeEntities(input);
+    expect(input).toEqual({ 'a&b': 'x', list: ['<'] });
+    expect(Object.keys(escapeEntities(input))).toEqual(['a&b', 'list']);
+    expect(escapeEntities(null)).toBeNull();
   });
 });
 
@@ -298,38 +90,83 @@ describe('validateData', () => {
 });
 
 describe('parseTemplate', () => {
-  const good = { version: 1, text: 't', data: {}, controls: { go: { who: 'owner', submit: true } }, blocks: [] };
+  const good = { version: 2, text: 't', data: {}, openui: 'x.oui', access: { buttons: 'anyone' } };
 
   it('parses a good template and records the name', () => {
     const p = parseTemplate(JSON.stringify(good), 'demo-request');
-    expect(p.name).toBe('demo-request');
-    expect(p.controls.go.submit).toBe(true);
+    expect(p).toMatchObject({
+      version: 2,
+      name: 'demo-request',
+      text: 't',
+      openui: 'x.oui',
+      access: { buttons: 'anyone' },
+    });
+  });
+
+  it('allows text and access to be left out', () => {
+    const p = parseTemplate(JSON.stringify({ version: 2, openui: 'x.oui' }), 'x');
+    expect(p.text).toBeUndefined();
+    expect(p.access).toBeUndefined();
+    expect(p.data).toEqual({});
+  });
+
+  it('refuses version 1 and no version as the old format, with the exact text', () => {
+    const text = 'template x uses the old JSON block format; rewrite it in OpenUI Lang (see the slack-ui skill)';
+    expect(() => parseTemplate(JSON.stringify({ version: 1, blocks: [] }), 'x')).toThrow(OldTemplateFormatError);
+    expect(() => parseTemplate(JSON.stringify({ version: 1, blocks: [] }), 'x')).toThrow(text);
+    expect(() => parseTemplate(JSON.stringify({ openui: 'x.oui' }), 'x')).toThrow(text);
   });
 
   it('rejects bad shapes', () => {
     expect(() => parseTemplate('nope', 'x')).toThrow(TemplateError);
-    expect(() => parseTemplate(JSON.stringify({ ...good, version: 2 }), 'x')).toThrow(/version/);
-    expect(() => parseTemplate(JSON.stringify({ ...good, blocks: {} }), 'x')).toThrow(/blocks/);
-    expect(() => parseTemplate(JSON.stringify({ ...good, controls: { a: { who: 'nobody' } } }), 'x')).toThrow(/who/);
+    expect(() => parseTemplate('[]', 'x')).toThrow(/JSON object/);
+    expect(() => parseTemplate(JSON.stringify({ ...good, version: 3 }), 'x')).toThrow(/version must be 2/);
+    expect(() => parseTemplate(JSON.stringify({ ...good, text: 5 }), 'x')).toThrow(/text must be a string/);
     expect(() => parseTemplate(JSON.stringify({ ...good, data: { a: { type: 'date' } } }), 'x')).toThrow(/type/);
-    expect(() => parseTemplate(JSON.stringify({ ...good, blocks: [{ $each: 'a' }] }), 'x')).toThrow(/\$each/);
   });
 
-  it('rejects an action_id that takes a value from data', () => {
-    const button = (id: string) => ({ type: 'button', action_id: id, text: { type: 'plain_text', text: 'B' } });
-    const top = { ...good, blocks: [{ type: 'actions', elements: [button('go-{{name}}')] }] };
-    expect(() => parseTemplate(JSON.stringify(top), 'x')).toThrow(TemplateError);
-    expect(() => parseTemplate(JSON.stringify(top), 'x')).toThrow(
-      'template "x": blocks[0].elements[0].action_id must be a fixed string, not filled from data',
-    );
-    const each = {
-      ...good,
-      data: { items: { type: 'array', items: { id: { type: 'string' } } } },
-      blocks: [{ type: 'actions', elements: [{ $each: 'items', as: 'it', do: button('{{ it.id }}') }] }],
-    };
-    expect(() => parseTemplate(JSON.stringify(each), 'x')).toThrow(/blocks\[0\]\.elements\[0\]\.do\.action_id/);
-    const fixed = { ...good, blocks: [{ type: 'actions', elements: [button('go')] }] };
-    expect(() => parseTemplate(JSON.stringify(fixed), 'x')).not.toThrow();
+  it.each([undefined, 5, '', 'x', 'x.txt', '../x.oui', 'a/b.oui', 'a\\b.oui', '.oui', '..oui/', '-x.oui'])(
+    'rejects the openui value %j',
+    (openui) => {
+      expect(() => parseTemplate(JSON.stringify({ version: 2, openui }), 'x')).toThrow(
+        /openui must be the plain file name/,
+      );
+    },
+  );
+
+  describe('access', () => {
+    const parse = (access: unknown) => () => parseTemplate(JSON.stringify({ ...good, access }), 'x');
+
+    it('accepts every rule shape, byId and lock', () => {
+      expect(
+        parse({
+          default: 'owner',
+          buttons: { group: 'S0EXAMPLE' },
+          inputs: { users: ['U1', 'U2'] },
+          feedback: 'anyone',
+          forms: 'owner',
+          byId: { ack: { group: 'S0EXAMPLE' }, other: 'anyone' },
+          lock: { ids: ['ack'] },
+        }),
+      ).not.toThrow();
+      expect(parse({ lock: 'never' })).not.toThrow();
+      expect(parse({ lock: 'buttons' })).not.toThrow();
+    });
+
+    it('rejects an access that is not an object, an unknown key and bad rules', () => {
+      expect(parse('anyone')).toThrow(/access must be an object/);
+      expect(parse([])).toThrow(/access must be an object/);
+      expect(parse({ extra: 'anyone' })).toThrow(/access\.extra is not a known setting/);
+      expect(parse({ buttons: 'nobody' })).toThrow(/access\.buttons must be/);
+      expect(parse({ buttons: { group: '' } })).toThrow(/access\.buttons must be/);
+      expect(parse({ inputs: { users: [] } })).toThrow(/access\.inputs must be/);
+      expect(parse({ inputs: { users: [1] } })).toThrow(/access\.inputs must be/);
+      expect(parse({ forms: { group: 'S1', users: ['U1'] } })).toThrow(/access\.forms must be/);
+      expect(parse({ byId: 'x' })).toThrow(/access\.byId must be an object/);
+      expect(parse({ byId: { ack: 'nobody' } })).toThrow(/access\.byId\.ack must be/);
+      expect(parse({ lock: 'always' })).toThrow(/access\.lock must be/);
+      expect(parse({ lock: { ids: [1] } })).toThrow(/access\.lock must be/);
+    });
   });
 });
 
@@ -349,13 +186,19 @@ describe('findTemplate', () => {
     return dir;
   }
 
-  const body = JSON.stringify({ version: 1, text: 't', blocks: [] });
+  const body = JSON.stringify({ version: 2, data: {}, openui: 'demo-request.oui' });
+  const oui = 'root = Root([])';
 
   it('finds a template under plugins/*/cards', async () => {
-    const dir = group({ 'plugins/plugin-a/cards/demo-request.json': body, 'plugins/other/readme.md': 'x' });
+    const dir = group({
+      'plugins/plugin-a/cards/demo-request.json': body,
+      'plugins/plugin-a/cards/demo-request.oui': oui,
+      'plugins/other/readme.md': 'x',
+    });
     const found = await findTemplate(dir, 'demo-request');
     expect(found.path).toBe(path.join(dir, 'plugins/plugin-a/cards/demo-request.json'));
     expect(found.template.name).toBe('demo-request');
+    expect(found.template.source).toBe(oui);
   });
 
   it('rejects names that are not slugs', async () => {
@@ -374,7 +217,9 @@ describe('findTemplate', () => {
   it('errors when two plugins define the same name', async () => {
     const dir = group({
       'plugins/plugin-a/cards/demo-request.json': body,
+      'plugins/plugin-a/cards/demo-request.oui': oui,
       'plugins/plugin-b/cards/demo-request.json': body,
+      'plugins/plugin-b/cards/demo-request.oui': oui,
     });
     const err = await findTemplate(dir, 'demo-request').catch((e) => e);
     expect(err).toBeInstanceOf(TemplateError);
@@ -382,6 +227,31 @@ describe('findTemplate', () => {
     expect(err.message).toContain('plugin-a');
     expect(err.message).toContain('plugin-b');
     expect(err.message).not.toContain(dir);
+  });
+
+  it('refuses a version 1 template with the exact text and no plugin suffix', async () => {
+    const dir = group({ 'plugins/p/cards/old.json': JSON.stringify({ version: 1, text: 't', blocks: [] }) });
+    const err = await findTemplate(dir, 'old').catch((e) => e);
+    expect(err).toBeInstanceOf(OldTemplateFormatError);
+    expect(err.message).toBe(
+      'template old uses the old JSON block format; rewrite it in OpenUI Lang (see the slack-ui skill)',
+    );
+  });
+
+  it('errors, without an absolute path, when the .oui file is missing', async () => {
+    const dir = group({ 'plugins/p/cards/no-src.json': JSON.stringify({ version: 2, openui: 'no-src.oui' }) });
+    const err = await findTemplate(dir, 'no-src').catch((e) => e);
+    expect(err).toBeInstanceOf(TemplateError);
+    expect(err.message).toMatch(/cannot read no-src\.oui/);
+    expect(err.message).not.toContain(dir);
+  });
+
+  it('only reads the .oui file beside the template, never another folder', async () => {
+    const dir = group({
+      'plugins/p/cards/x.json': JSON.stringify({ version: 2, openui: '../secret.oui' }),
+      'plugins/p/secret.oui': 'root = Root([])',
+    });
+    await expect(findTemplate(dir, 'x')).rejects.toThrow(/openui must be the plain file name/);
   });
 
   it('wraps read and parse failures in TemplateError without absolute paths', async () => {

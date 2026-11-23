@@ -1,0 +1,9 @@
+root = Root([intro, acts])
+$title = ""
+$items = []
+$pick = []
+$choice = ""
+intro = Section("*" + $title + "*\nTick what you want, then press Create.")
+acts = Actions([pick, create])
+pick = Checkboxes("pick", $pick, @Each($items, "it", Option(it.name, it.name)))
+create = Button("Create", Action([@Set($choice, "create")]), "primary")

@@ -1,15 +1,18 @@
 /**
  * `post_card` delivery action: post an interactive card into the session's
- * own Slack chat. Order: find + validate + fill the template, insert the
- * ui_cards row, render, post, record the message ts. A failed post removes
- * the row again. The handler never throws to delivery; every failure becomes
- * a `post_card failed: ...` notice to the agent (path-free, token-free).
+ * own Slack chat. Order: find the v2 template and validate its data, check the
+ * card id was not posted already, then hand the OpenUI Lang source to the kit,
+ * which renders, posts and saves the card. The handler never throws to
+ * delivery; every failure becomes a `post_card failed: ...` notice to the
+ * agent (path-free, token-free).
  */
 import path from 'node:path';
 
 import Database from 'better-sqlite3';
 
-import { botTokenKeyForInstance, slackCall } from '../../channels/slack-lib.js';
+import { CardRenderError } from 'slack-ui-kit';
+
+import { botTokenKeyForInstance } from '../../channels/slack-lib.js';
 import { registerDeliveryAction } from '../../delivery.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
@@ -19,10 +22,11 @@ import { resolveGroupFolderPath } from '../../group-folder.js';
 import { log } from '../../log.js';
 import { sessionDir } from '../../session-manager.js';
 import type { Session } from '../../types.js';
-import { deleteCard, getCard, insertCard, setMessageTs } from './db/ui-cards.js';
+import { getCardById } from './db/kit-cards.js';
+import { kit } from './kit.js';
 import { notifyCardFailure } from './notify.js';
-import { renderCard } from './render.js';
-import { fillTemplate, findTemplate, TemplateError, validateData } from './template.js';
+import { slackClientForToken } from './slack-client.js';
+import { escapeEntities, findTemplate, TemplateError, validateData } from './template.js';
 
 const CARD_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -178,75 +182,39 @@ async function postCard(content: Record<string, unknown>, session: Session): Pro
   const group = await getAgentGroup(session.agent_group_id);
   if (!group) throw new PostCardError('agent group not found');
 
-  let filled: ReturnType<typeof fillTemplate>;
   let template: Awaited<ReturnType<typeof findTemplate>>['template'];
   let data: Record<string, unknown>;
   try {
     template = (await findTemplate(resolveGroupFolderPath(group.folder), templateName)).template;
     data = validateData(template, content.data ?? {});
-    filled = fillTemplate(template, data);
   } catch (err) {
     if (err instanceof TemplateError) throw new PostCardError(err.message);
     throw err;
   }
+  if (template.source === undefined) throw new PostCardError('template has no OpenUI source');
 
-  const existing = await getCard(cardId);
+  const existing = await getCardById(cardId);
   if (existing) {
-    if (existing.sessionId !== session.id) throw new PostCardError('card id already in use');
-    if (existing.messageTs) return; // redelivery of a card that was already posted
-    await deleteCard(cardId); // an earlier attempt died mid-post
+    if (existing.meta?.sessionId !== session.id) throw new PostCardError('card id already in use');
+    return; // redelivery of a card that was already posted
   }
 
-  await insertCard({
-    id: cardId,
-    agentGroupId: session.agent_group_id,
-    sessionId: session.id,
-    instance,
-    channelId: channel,
-    threadTs,
-    ownerUserId: readInboundSender(session, content.inReplyTo),
-    templateName,
-    template,
-    data,
-    state: filled.initialState,
-  });
-
-  let ts: string;
-  try {
-    const row = await getCard(cardId);
-    if (!row) throw new PostCardError('card row missing after insert');
-    const { text, blocks } = renderCard(row);
-    const res = await slackCall(
-      token,
-      'chat.postMessage',
-      { channel, text, blocks, ...(threadTs ? { thread_ts: threadTs } : {}) },
-      'post_card',
-    );
-    if (typeof res.ts !== 'string') throw new PostCardError('Slack did not return a message timestamp');
-    ts = res.ts;
-  } catch (err) {
-    await deleteCard(cardId).catch(() => {});
-    throw err;
-  }
-
-  // Slack accepted the post: the message exists, so never delete the row or
-  // report failure from here on. Retry the save once, then leave it to the log.
-  const saveFailed = (err: unknown) =>
-    log.error('slack-ui: card posted but saving its message ts failed', {
+  const owner = readInboundSender(session, content.inReplyTo) ?? '';
+  await kit.postCard(slackClientForToken(token), { channel, ...(threadTs ? { threadTs } : {}) }, template.source, {
+    owner,
+    access: template.access,
+    trusted: true,
+    placeholder: false,
+    state: escapeEntities(data),
+    meta: {
+      kind: 'card',
       cardId,
-      ts,
-      err: err instanceof Error ? err.message : String(err),
-    });
-  try {
-    await setMessageTs(cardId, ts);
-  } catch (first) {
-    saveFailed(first);
-    try {
-      await setMessageTs(cardId, ts);
-    } catch (second) {
-      saveFailed(second);
-    }
-  }
+      template: templateName,
+      agentGroupId: session.agent_group_id,
+      sessionId: session.id,
+      instance,
+    },
+  });
 }
 
 export async function handlePostCard(content: Record<string, unknown>, session: Session): Promise<void> {
@@ -254,7 +222,9 @@ export async function handlePostCard(content: Record<string, unknown>, session: 
     await postCard(content, session);
   } catch (err) {
     const reason =
-      err instanceof PostCardError || (err instanceof Error && err.name === 'SlackApiError')
+      err instanceof PostCardError ||
+      err instanceof CardRenderError ||
+      (err instanceof Error && err.name === 'SlackApiError')
         ? err.message
         : 'unexpected error (see host log)';
     log.warn('slack-ui: post_card failed', { err: err instanceof Error ? err.message : String(err) });

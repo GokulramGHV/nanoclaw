@@ -1,493 +1,167 @@
+import type { ActionEvent, Adapter } from 'chat';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { CardEvent } from 'slack-ui-kit';
 
-vi.mock('../../channels/slack-lib.js', () => ({
-  slackCall: vi.fn(),
-  botTokenKeyForInstance: (i: string) => (i === 'slack' ? 'SLACK_BOT_TOKEN' : 'SLACK_BOT_TOKEN_X'),
-}));
-vi.mock('../../session-manager.js', () => ({ writeSessionMessage: vi.fn() }));
-vi.mock('../../request-wake.js', () => ({ requestWake: vi.fn() }));
-vi.mock('../../db/sessions.js', () => ({ getSession: vi.fn() }));
-vi.mock('../../env.js', async (orig) => ({ ...(await orig<typeof import('../../env.js')>()), envValue: vi.fn() }));
 vi.mock('../../log.js', () => ({ log: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
 
-import type { ActionEvent, Adapter } from 'chat';
-
-import { slackCall } from '../../channels/slack-lib.js';
-import { getSession } from '../../db/sessions.js';
-import { closeDb, initTestDb, runMigrations } from '../../db/index.js';
-import { envValue } from '../../env.js';
-import { requestWake } from '../../request-wake.js';
-import { writeSessionMessage } from '../../session-manager.js';
-import { handleCardAction } from './clicks.js';
-import './db/migrations.js';
-import { getCard, insertCard, setMessageTs, tryLock, updateState } from './db/ui-cards.js';
-import type { CardTemplate } from './template.js';
-
-vi.mock('./db/ui-cards.js', async (orig) => {
-  const actual = await orig<typeof import('./db/ui-cards.js')>();
-  return { ...actual, updateState: vi.fn(actual.updateState), setMessageTs: vi.fn(actual.setMessageTs) };
-});
-
-const call = vi.mocked(slackCall);
-const write = vi.mocked(writeSessionMessage);
-const wake = vi.mocked(requestWake);
-
-const template: CardTemplate = {
-  version: 1,
-  name: 'demo-request',
-  text: 'Demo',
-  data: {},
-  controls: {
-    pick: { who: 'owner' },
-    ok: { who: 'owner' },
-    create: { who: 'owner', submit: true },
-    quiet: { who: 'owner', submit: true, notify: false },
-    open: { who: 'anyone' },
-    notepick: { who: 'owner', notify: true },
-    gbtn: { who: { group: 'S-GRP' } },
-    glock: { who: { group: 'S-LOCK' } },
-  },
-  blocks: [
-    {
-      type: 'actions',
-      elements: [
-        {
-          type: 'checkboxes',
-          action_id: 'pick',
-          options: [
-            { text: { type: 'plain_text', text: 'A' }, value: 'a' },
-            { text: { type: 'plain_text', text: 'B' }, value: 'b' },
-          ],
-        },
-        { type: 'button', action_id: 'ok', text: { type: 'plain_text', text: 'OK' } },
-        { type: 'button', action_id: 'create', text: { type: 'plain_text', text: 'Create' } },
-      ],
-    },
-  ],
-};
-
-const insertBare = async (over: Record<string, unknown> = {}) => {
-  await insertCard({
-    id: 'c1',
-    agentGroupId: 'ag-1',
-    sessionId: 's-1',
-    instance: 'slack',
-    channelId: 'C1',
-    threadTs: '1700000000.000100',
-    ownerUserId: 'U1',
-    templateName: 'demo-request',
-    template,
-    data: {},
-    state: { pick: ['a', 'b'] },
-    ...over,
-  });
-};
-
-const newCard = async (over: Record<string, unknown> = {}) => {
-  await insertBare(over);
-  await import('./db/ui-cards.js').then((m) => m.setMessageTs('c1', '1700000001.000200'));
-};
-
-function ev(actionId: string, opts: { user?: string; raw?: Record<string, unknown> } = {}): ActionEvent {
-  const type = actionId.endsWith(':pick') ? 'checkboxes' : 'button';
+const fake = vi.hoisted(() => ({ calls: [] as Array<{ method: string; args: any }>, hasToken: true }));
+function makeClient() {
+  const rec =
+    (method: string, result: unknown = { ok: true }) =>
+    async (args: unknown) => {
+      fake.calls.push({ method, args });
+      return result;
+    };
   return {
-    actionId,
-    value: undefined,
-    user: { userId: opts.user ?? 'U1', userName: 'alice', fullName: 'Alice A' },
-    raw: {
-      channel: { id: 'C1' },
-      container: { thread_ts: '1700000000.000100' },
-      actions: [{ action_id: actionId, type, value: 'v', action_ts: '111.1' }],
-      ...opts.raw,
+    chat: {
+      postMessage: rec('chat.postMessage', { ok: true, ts: '1700000000.000100' }),
+      update: rec('chat.update'),
+      delete: rec('chat.delete'),
+      postEphemeral: rec('chat.postEphemeral'),
     },
-  } as unknown as ActionEvent;
+    views: { open: rec('views.open') },
+  };
+}
+vi.mock('./slack-client.js', () => ({
+  slackClientForInstance: () => (fake.hasToken ? makeClient() : undefined),
+  slackClientForToken: () => makeClient(),
+}));
+
+import { closeDb, initTestDb, runMigrations } from '../../db/index.js';
+import { log } from '../../log.js';
+import './db/migrations.js';
+import { handleKitAction, locateMessage, NO_LONGER_ACTIVE } from './clicks.js';
+import { kit, registerCardEventHandler } from './kit.js';
+
+const SOURCE = `root = Root([acts])
+$decision = ""
+acts = Actions([go])
+go = Button("Go", Action([@Set($decision, "go")]), "primary")`;
+
+const TS = '1700000000.000100';
+const adapter = {} as Adapter;
+
+const press = (over: Record<string, unknown> = {}, actionId = 'go', user = 'U1') =>
+  ({
+    actionId,
+    user: { userId: user },
+    raw: {
+      type: 'block_actions',
+      user: { id: user },
+      channel: { id: 'C1' },
+      container: { channel_id: 'C1', message_ts: TS },
+      message: { ts: TS },
+      trigger_id: 't1',
+      actions: [{ type: 'button', action_id: actionId, text: { type: 'plain_text', text: 'Go' } }],
+      ...over,
+    },
+  }) as unknown as ActionEvent;
+
+const events: CardEvent[] = [];
+let failFirst = false;
+
+async function postCard(instance = 'slack') {
+  const client = makeClient();
+  await kit.postCard(client, { channel: 'C1' }, SOURCE, {
+    owner: 'U1',
+    trusted: true,
+    placeholder: false,
+    meta: { kind: 'card', cardId: 'card-1', template: 'demo', agentGroupId: 'ag-1', sessionId: 's-1', instance },
+  });
+  fake.calls.length = 0;
 }
 
-const press = (actionId: string, actionTs?: string) => ({
-  action_id: actionId,
-  type: 'button',
-  value: 'v',
-  ...(actionTs ? { action_ts: actionTs } : {}),
-});
-
-const adapter = {} as Adapter;
-const methods = () => call.mock.calls.map((c) => c[1]);
-
 beforeEach(async () => {
-  vi.clearAllMocks();
   await runMigrations(await initTestDb());
-  vi.mocked(envValue).mockReturnValue('xoxb-test');
-  call.mockResolvedValue({ ok: true });
-  vi.mocked(getSession).mockResolvedValue({ id: 's-1' } as never);
-  write.mockResolvedValue(undefined as never);
+  vi.clearAllMocks();
+  fake.calls.length = 0;
+  fake.hasToken = true;
+  events.length = 0;
+  failFirst = false;
+  registerCardEventHandler('card', async (e) => {
+    if (failFirst) {
+      failFirst = false;
+      throw new Error('write failed');
+    }
+    events.push(e);
+  });
 });
 
 afterEach(async () => {
-  vi.unstubAllGlobals();
   await closeDb();
 });
 
-/** The group lookup sends its own form-encoded fetch, not slackCall. */
-function groupLookup(users: string[], before?: () => Promise<unknown>): void {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async (url: string) => {
-      if (!String(url).endsWith('/usergroups.users.list')) throw new Error(`unexpected fetch ${url}`);
-      if (before) await before();
-      return { ok: true, status: 200, json: async () => ({ ok: true, users }) };
-    }),
-  );
-}
-
-describe('handleCardAction', () => {
-  it('returns false for a non-ncu id', async () => {
-    expect(await handleCardAction(ev('ncq:x:y'), adapter, 'slack')).toBe(false);
-    expect(call).not.toHaveBeenCalled();
-  });
-
-  it('answers an unknown card with an ephemeral', async () => {
-    expect(await handleCardAction(ev('ncu:nope:ok'), adapter, 'slack')).toBe(true);
-    expect(call).toHaveBeenCalledWith(
-      'xoxb-test',
-      'chat.postEphemeral',
-      expect.objectContaining({
-        channel: 'C1',
-        user: 'U1',
-        text: 'This card is no longer active.',
-        thread_ts: '1700000000.000100',
-      }),
-      expect.any(String),
-    );
-  });
-
-  it('treats a card from another instance as inactive', async () => {
-    await newCard({ instance: 'slack-other' });
-    await handleCardAction(ev('ncu:c1:ok'), adapter, 'slack');
-    expect(call.mock.calls[0][2]).toMatchObject({ text: 'This card is no longer active.' });
-    expect(write).not.toHaveBeenCalled();
-  });
-
-  it('does nothing without a bot token', async () => {
-    vi.mocked(envValue).mockReturnValue(undefined);
-    expect(await handleCardAction(ev('ncu:c1:ok'), adapter, 'slack')).toBe(true);
-    expect(call).not.toHaveBeenCalled();
-  });
-
-  it('refuses a non-owner, redraws stored state, no write', async () => {
-    await newCard();
-    const raw = {
-      state: { values: { b1: { 'ncu:c1:pick': { type: 'checkboxes', selected_options: [] } } } },
-    };
-    expect(await handleCardAction(ev('ncu:c1:pick', { user: 'U2', raw }), adapter, 'slack')).toBe(true);
-    expect(methods()).toEqual(['chat.postEphemeral', 'chat.update']);
-    expect(call.mock.calls[0][2]).toMatchObject({ user: 'U2', text: 'Only <@U1> can do this.' });
-    expect(call.mock.calls[1][2]).toMatchObject({ channel: 'C1', ts: '1700000001.000200' });
-    expect((await getCard('c1'))!.state).toEqual({ pick: ['a', 'b'] });
-    expect(write).not.toHaveBeenCalled();
-  });
-
-  it('stores a checkbox tick without notifying or redrawing', async () => {
-    await newCard();
-    const raw = {
-      state: {
-        values: {
-          b1: { 'ncu:c1:pick': { type: 'checkboxes', selected_options: [{ value: 'a' }] } },
-        },
-      },
-      actions: [
-        { action_id: 'ncu:c1:pick', type: 'checkboxes', selected_options: [{ value: 'a' }], action_ts: '111.1' },
-      ],
-    };
-    await handleCardAction(ev('ncu:c1:pick', { raw }), adapter, 'slack');
-    expect((await getCard('c1'))!.state).toEqual({ pick: ['a'] });
-    expect(write).not.toHaveBeenCalled();
-    expect(call).not.toHaveBeenCalled();
-  });
-
-  it('ignores payload entries that belong to another card', async () => {
-    await newCard();
-    const raw = {
-      state: {
-        values: {
-          b1: { 'ncu:other:pick': { type: 'checkboxes', selected_options: [{ value: 'z' }] } },
-        },
-      },
-    };
-    await handleCardAction(ev('ncu:c1:ok', { raw }), adapter, 'slack');
-    expect((await getCard('c1'))!.state).toEqual({ pick: ['a', 'b'] });
-    expect(JSON.parse(write.mock.calls[0][2].content).payload.state).toEqual({ pick: ['a', 'b'] });
-  });
-
-  it('sends one agent message for an allowed button', async () => {
-    await newCard();
-    await handleCardAction(ev('ncu:c1:ok'), adapter, 'slack');
-    expect(write).toHaveBeenCalledTimes(1);
-    const [group, sess, msg] = write.mock.calls[0];
-    expect([group, sess]).toEqual(['ag-1', 's-1']);
-    expect(msg).toMatchObject({
-      id: 'card-c1-111.1',
-      kind: 'webhook',
-      platformId: 'slack:C1',
-      channelType: 'slack',
-      threadId: 'slack:C1:1700000000.000100',
-    });
-    expect(JSON.parse(msg.content)).toEqual({
-      source: 'slack-ui',
-      event: 'card_event',
-      payload: {
-        cardId: 'c1',
-        template: 'demo-request',
-        control: 'ok',
-        value: 'v',
-        user: { id: 'U1', name: 'alice' },
-        state: { pick: ['a', 'b'] },
-        locked: false,
-      },
-    });
-    expect(wake).toHaveBeenCalledWith({ id: 's-1' }, 'interactive');
-    expect(call).not.toHaveBeenCalled();
-  });
-
-  it('uses a null thread id for a card outside a thread', async () => {
-    await newCard({ threadTs: null });
-    await handleCardAction(ev('ncu:c1:ok'), adapter, 'slack');
-    expect(write.mock.calls[0][2].threadId).toBeNull();
-  });
-
-  it('submit locks, notifies with merged state, then redraws the locked view', async () => {
-    await newCard();
-    const raw = {
-      state: {
-        values: { b1: { 'ncu:c1:pick': { type: 'checkboxes', selected_options: [{ value: 'b' }] } } },
-      },
-    };
-    await handleCardAction(ev('ncu:c1:create', { raw }), adapter, 'slack');
-    const stored = (await getCard('c1'))!;
-    expect(stored).toMatchObject({ locked: true, lockedBy: 'U1', state: { pick: ['b'] } });
-    expect(methods()).toEqual(['chat.update']);
-    expect(JSON.stringify(call.mock.calls[0][2])).toContain('Submitted');
-    const payload = JSON.parse(write.mock.calls[0][2].content).payload;
-    expect(payload).toMatchObject({ control: 'create', locked: true, state: { pick: ['b'] } });
-    const updateOrder = call.mock.invocationCallOrder[0];
-    expect(write.mock.invocationCallOrder[0]).toBeLessThan(updateOrder);
-    expect(wake.mock.invocationCallOrder[0]).toBeLessThan(updateOrder);
-  });
-
-  it('submit without touching the checkboxes sends the seeded state', async () => {
-    await newCard();
-    await handleCardAction(ev('ncu:c1:create'), adapter, 'slack');
-    expect(JSON.parse(write.mock.calls[0][2].content).payload.state).toEqual({ pick: ['a', 'b'] });
-  });
-
-  it('submit with notify:false locks but sends nothing', async () => {
-    await newCard();
-    await handleCardAction(ev('ncu:c1:quiet'), adapter, 'slack');
-    expect((await getCard('c1'))!.locked).toBe(true);
-    expect(write).not.toHaveBeenCalled();
-  });
-
-  it('writes one agent message when the same click is delivered twice', async () => {
-    await newCard();
-    write
-      .mockResolvedValueOnce(undefined as never)
-      .mockRejectedValueOnce(new Error('UNIQUE constraint failed: messages_in.id'));
-    await handleCardAction(ev('ncu:c1:ok'), adapter, 'slack');
-    await handleCardAction(ev('ncu:c1:ok'), adapter, 'slack');
-    expect(write).toHaveBeenCalledTimes(2);
-    expect(wake).toHaveBeenCalledTimes(1);
-  });
-
-  it('two concurrent submits produce one lock', async () => {
-    await newCard();
-    const [a, b] = await Promise.all([
-      handleCardAction(ev('ncu:c1:create', { raw: { actions: [press('ncu:c1:create', '1.1')] } }), adapter, 'slack'),
-      handleCardAction(ev('ncu:c1:create', { raw: { actions: [press('ncu:c1:create', '2.2')] } }), adapter, 'slack'),
-    ]);
-    expect([a, b]).toEqual([true, true]);
-    expect(write).toHaveBeenCalledTimes(1);
-    const ephemerals = call.mock.calls.filter((c) => c[1] === 'chat.postEphemeral');
-    expect(ephemerals).toHaveLength(1);
-    expect(ephemerals[0][2]).toMatchObject({ text: 'This was already submitted.' });
-  });
-
-  it('answers a press on a locked card', async () => {
-    await newCard();
-    await handleCardAction(ev('ncu:c1:create'), adapter, 'slack');
-    vi.clearAllMocks();
-    await handleCardAction(ev('ncu:c1:ok'), adapter, 'slack');
-    expect(call.mock.calls[0][2]).toMatchObject({ text: 'This was already submitted.' });
-    expect(write).not.toHaveBeenCalled();
-  });
-
-  it('skips the message when the session is gone', async () => {
-    await newCard();
-    vi.mocked(getSession).mockResolvedValue(undefined);
-    expect(await handleCardAction(ev('ncu:c1:ok'), adapter, 'slack')).toBe(true);
-    expect(write).not.toHaveBeenCalled();
-    expect(wake).not.toHaveBeenCalled();
-  });
-
-  it('logs and returns true when the write fails for another reason', async () => {
-    await newCard();
-    write.mockRejectedValue(new Error('disk full'));
-    expect(await handleCardAction(ev('ncu:c1:ok'), adapter, 'slack')).toBe(true);
-    expect(wake).not.toHaveBeenCalled();
-  });
-
-  it('survives a failing chat.update', async () => {
-    await newCard();
-    call.mockRejectedValue(new Error('boom'));
-    expect(await handleCardAction(ev('ncu:c1:create'), adapter, 'slack')).toBe(true);
-    expect(write).toHaveBeenCalledTimes(1);
-  });
-
-  it('lets anyone press an open control', async () => {
-    await newCard();
-    await updateState('c1', { pick: ['a'] });
-    await handleCardAction(ev('ncu:c1:open', { user: 'U9' }), adapter, 'slack');
-    expect(write).toHaveBeenCalledTimes(1);
+describe('locateMessage', () => {
+  it('reads container first, then channel and message', () => {
+    expect(locateMessage({ container: { channel_id: 'C1', message_ts: '1.1' } })).toEqual({ channel: 'C1', ts: '1.1' });
+    expect(locateMessage({ channel: { id: 'C2' }, message: { ts: '2.2' } })).toEqual({ channel: 'C2', ts: '2.2' });
+    expect(locateMessage({ channel: { id: 'C2' } })).toBeUndefined();
+    expect(locateMessage('x')).toBeUndefined();
   });
 });
 
-describe('fix round 1', () => {
-  const tick = (id: string, values: string[]) => ({
-    state: {
-      values: {
-        b1: { [id]: { type: 'checkboxes', selected_options: values.map((value) => ({ value })) } },
-      },
-    },
-  });
-
-  it('does not overwrite a card locked between load and write', async () => {
-    await newCard();
-    groupLookup(['U2'], () => tryLock('c1', 'U9'));
-    await handleCardAction(ev('ncu:c1:glock', { user: 'U2', raw: tick('ncu:c1:glock', ['x']) }), adapter, 'slack');
-    expect((await getCard('c1'))!.state).toEqual({ pick: ['a', 'b'] });
-    expect(write).not.toHaveBeenCalled();
-    const eph = call.mock.calls.filter((c) => c[1] === 'chat.postEphemeral');
-    expect(eph[0][2]).toMatchObject({ text: 'This was already submitted.' });
-  });
-
-  it('drops payload state for controls the presser may not press', async () => {
-    await newCard();
-    await handleCardAction(ev('ncu:c1:open', { user: 'U2', raw: tick('ncu:c1:pick', ['a']) }), adapter, 'slack');
-    expect((await getCard('c1'))!.state).toEqual({ pick: ['a', 'b'] });
-    expect(JSON.parse(write.mock.calls[0][2].content).payload.state).toEqual({ pick: ['a', 'b'] });
-  });
-
-  it('takes no lock for a refused submit press', async () => {
-    await newCard();
-    await handleCardAction(ev('ncu:c1:create', { user: 'U2' }), adapter, 'slack');
-    expect((await getCard('c1'))!.locked).toBe(false);
-    expect(write).not.toHaveBeenCalled();
-  });
-
-  it('applies a group rule through the group lookup', async () => {
-    await newCard();
-    groupLookup(['U2']);
-    await handleCardAction(ev('ncu:c1:gbtn', { user: 'U3' }), adapter, 'slack');
-    expect(write).not.toHaveBeenCalled();
-    expect(call.mock.calls.some((c) => (c[2] as { text?: string }).text?.includes('<!subteam^S-GRP>'))).toBe(true);
-    await handleCardAction(ev('ncu:c1:gbtn', { user: 'U2' }), adapter, 'slack');
-    expect(write).toHaveBeenCalledTimes(1);
-  });
-
-  it('notifies for a checkbox with notify: true', async () => {
-    await newCard();
-    await handleCardAction(ev('ncu:c1:notepick', { raw: tick('ncu:c1:notepick', ['a']) }), adapter, 'slack');
-    expect(write).toHaveBeenCalledTimes(1);
-  });
-
-  it('still redraws and notifies when updateState throws after the lock', async () => {
-    await newCard();
-    vi.mocked(updateState).mockRejectedValueOnce(new Error('db down'));
-    await handleCardAction(ev('ncu:c1:create'), adapter, 'slack');
-    expect(methods()).toEqual(['chat.update']);
-    expect(write).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe('final review fixes', () => {
-  /** A write mock that rejects a repeated message id, like the real messages_in primary key. */
-  const uniqueWrites = () => {
-    const seen = new Set<string>();
-    write.mockImplementation(async (_g, _s, msg) => {
-      if (seen.has(msg.id)) throw new Error('UNIQUE constraint failed: messages_in.id');
-      seen.add(msg.id);
+describe('handleKitAction', () => {
+  it('answers an old ncu: press privately and claims it', async () => {
+    expect(await handleKitAction(press({}, 'ncu:card-1:go'), adapter, 'slack')).toBe(true);
+    expect(fake.calls).toHaveLength(1);
+    expect(fake.calls[0]).toMatchObject({
+      method: 'chat.postEphemeral',
+      args: { channel: 'C1', user: 'U1', text: NO_LONGER_ACTIVE },
     });
-  };
-
-  let clock: { mockRestore: () => void } | undefined;
-  const pinClock = (ms: number) => {
-    clock = vi.spyOn(Date, 'now').mockReturnValue(ms);
-  };
-
-  afterEach(() => {
-    clock?.mockRestore();
-    clock = undefined;
   });
 
-  it('keys the agent message on the clicked action_ts inside actions[]', async () => {
-    await newCard();
-    const raw = { actions: [press('ncu:c1:other', '9.9'), press('ncu:c1:ok', '7.7')] };
-    await handleCardAction(ev('ncu:c1:ok', { raw }), adapter, 'slack');
-    expect(write.mock.calls[0][2].id).toBe('card-c1-7.7');
+  it('falls through when no card is stored for the message', async () => {
+    expect(await handleKitAction(press(), adapter, 'slack')).toBe(false);
+    expect(fake.calls).toHaveLength(0);
   });
 
-  it('two different presses in the same millisecond both reach the agent', async () => {
-    await newCard();
-    pinClock(1_700_000_000_000);
-    uniqueWrites();
-    await handleCardAction(ev('ncu:c1:ok', { raw: { actions: [press('ncu:c1:ok', '5.1')] } }), adapter, 'slack');
-    await handleCardAction(ev('ncu:c1:ok', { raw: { actions: [press('ncu:c1:ok', '5.2')] } }), adapter, 'slack');
-    expect(write.mock.calls.map((c) => c[2].id)).toEqual(['card-c1-5.1', 'card-c1-5.2']);
-    expect(wake).toHaveBeenCalledTimes(2);
+  it('falls through when the press carries no message location', async () => {
+    expect(
+      await handleKitAction(press({ container: undefined, channel: undefined, message: undefined }), adapter, 'slack'),
+    ).toBe(false);
   });
 
-  it('a redelivery with the same action_ts writes once', async () => {
-    await newCard();
-    uniqueWrites();
-    await handleCardAction(ev('ncu:c1:ok', { raw: { actions: [press('ncu:c1:ok', '5.1')] } }), adapter, 'slack');
-    await handleCardAction(ev('ncu:c1:ok', { raw: { actions: [press('ncu:c1:ok', '5.1')] } }), adapter, 'slack');
-    expect(wake).toHaveBeenCalledTimes(1);
+  it('falls through when the card belongs to another Slack app instance', async () => {
+    await postCard('other');
+    expect(await handleKitAction(press(), adapter, 'slack')).toBe(false);
+    expect(fake.calls).toHaveLength(0);
+    expect(events).toHaveLength(0);
   });
 
-  it('falls back to the clock when the press has no action_ts', async () => {
-    await newCard();
-    pinClock(1_700_000_000_123);
-    await handleCardAction(ev('ncu:c1:ok', { raw: { actions: [press('ncu:c1:ok')] } }), adapter, 'slack');
-    expect(write.mock.calls[0][2].id).toBe('card-c1-1700000000123');
+  it('hands a kit card press to the kit: redraws, locks and sends one event', async () => {
+    await postCard();
+    expect(await handleKitAction(press(), adapter, 'slack')).toBe(true);
+    expect(fake.calls.map((c) => c.method)).toContain('chat.update');
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      type: 'action',
+      user: 'U1',
+      control: { id: 'go', kind: 'button' },
+      state: { $decision: 'go' },
+      meta: { cardId: 'card-1', kind: 'card' },
+    });
+    expect((await kit.getCard('C1', TS))?.locked?.by).toBe('U1');
   });
 
-  it('still redraws a submitted card when telling the agent throws', async () => {
-    await newCard();
-    vi.mocked(getSession).mockRejectedValue(new Error('db down'));
-    expect(await handleCardAction(ev('ncu:c1:create'), adapter, 'slack')).toBe(true);
-    expect(methods()).toEqual(['chat.update']);
-    expect(JSON.stringify(call.mock.calls[0][2])).toContain('Submitted');
+  it('refuses a press from someone who is not the owner, privately, with no event', async () => {
+    await postCard();
+    expect(await handleKitAction(press({}, 'go', 'U2'), adapter, 'slack')).toBe(true);
+    expect(fake.calls.map((c) => c.method)).toContain('chat.postEphemeral');
+    expect(events).toHaveLength(0);
   });
 
-  it('redraws a card with no stored ts using the message ts from the press, and saves it', async () => {
-    await insertBare();
-    const raw = { container: { thread_ts: '1700000000.000100', message_ts: '1700000009.000900' } };
-    await handleCardAction(ev('ncu:c1:create', { raw }), adapter, 'slack');
-    const update = call.mock.calls.find((c) => c[1] === 'chat.update');
-    expect(update?.[2]).toMatchObject({ channel: 'C1', ts: '1700000009.000900' });
-    expect((await getCard('c1'))!.messageTs).toBe('1700000009.000900');
+  it('retries the event once when its handler fails, and does not throw', async () => {
+    await postCard();
+    failFirst = true;
+    await expect(handleKitAction(press(), adapter, 'slack')).resolves.toBe(true);
+    expect(events).toHaveLength(1);
+    expect(vi.mocked(log.error)).toHaveBeenCalledWith(expect.stringContaining('retrying once'), expect.anything());
   });
 
-  it('uses the press message ts on a refused press too, and ignores a failed save', async () => {
-    await insertBare();
-    vi.mocked(setMessageTs).mockRejectedValueOnce(new Error('db busy'));
-    const raw = { container: { message_ts: '1700000009.000900' } };
-    expect(await handleCardAction(ev('ncu:c1:ok', { user: 'U2', raw }), adapter, 'slack')).toBe(true);
-    const update = call.mock.calls.find((c) => c[1] === 'chat.update');
-    expect(update?.[2]).toMatchObject({ ts: '1700000009.000900' });
-  });
-
-  it('skips the redraw when neither the card nor the press has a ts', async () => {
-    await insertBare();
-    await handleCardAction(ev('ncu:c1:ok', { user: 'U2' }), adapter, 'slack');
-    expect(methods()).toEqual(['chat.postEphemeral']);
+  it('claims the press without throwing when there is no bot token', async () => {
+    await postCard();
+    fake.hasToken = false;
+    await expect(handleKitAction(press(), adapter, 'slack')).resolves.toBe(true);
+    expect(events).toHaveLength(0);
   });
 });

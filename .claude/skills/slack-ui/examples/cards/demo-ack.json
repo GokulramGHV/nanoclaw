@@ -1,0 +1,8 @@
+{
+  "version": 2,
+  "data": {
+    "title": { "type": "string", "required": true, "maxLength": 150 }
+  },
+  "access": { "byId": { "ack": { "group": "S0EXAMPLE" } } },
+  "openui": "demo-ack.oui"
+}

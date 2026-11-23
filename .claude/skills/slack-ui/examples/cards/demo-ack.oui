@@ -1,0 +1,6 @@
+root = Root([intro, acts])
+$title = ""
+$acked = false
+intro = Section("*" + $title + "*\nOnly members of the test user group can acknowledge this.")
+acts = Actions([ack])
+ack = Button("Acknowledge", Action([@Set($acked, true)]), "primary")
