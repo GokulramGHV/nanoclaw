@@ -191,7 +191,7 @@ export function createHold(deps: HoldDeps): {
 }
 
 /** Tools that write their own row to a chat, so held text for that chat must go out before them. */
-const CHAT_TOOLS = new Set(['post_card', 'ask_user_question', 'send_card', 'send_message']);
+const CHAT_TOOLS = new Set(['post_card', 'ask', 'ask_user_question', 'send_card', 'send_message']);
 
 /**
  * Observer for tools that write a row to a chat themselves. Tool events fire in the

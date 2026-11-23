@@ -38,6 +38,14 @@ function takeContext(key: string): EventContext | undefined {
   return contexts.get(key)?.ctx;
 }
 
+/** The noted context for one event, removed on the way out. For handlers that write their own agent message. */
+export function takeEventContext(channel: string, ts: string, user: string): EventContext | undefined {
+  const key = contextKey(channel, ts, user);
+  const ctx = takeContext(key);
+  dropContext(key);
+  return ctx;
+}
+
 function dropContext(key: string): void {
   const hit = contexts.get(key);
   if (hit) clearTimeout(hit.timer);
@@ -50,7 +58,7 @@ function stripDollar(v: unknown): unknown {
   return Object.fromEntries(Object.entries(v).map(([k, val]) => [k.startsWith('$') ? k.slice(1) : k, val]));
 }
 
-function isDuplicate(err: unknown): boolean {
+export function isDuplicate(err: unknown): boolean {
   const code = typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined;
   const msg = err instanceof Error ? err.message : String(err);
   return code === 'SQLITE_CONSTRAINT_PRIMARYKEY' || msg.includes('UNIQUE') || msg.includes('PRIMARY KEY');

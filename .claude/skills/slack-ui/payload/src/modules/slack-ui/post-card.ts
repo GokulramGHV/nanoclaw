@@ -33,14 +33,14 @@ const CARD_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 class PostCardError extends Error {}
 
 /** `slack:<channel>:<ts>` -> ts, only when the channel matches. */
-function threadTsFor(threadId: unknown, channel: string): string | null {
+export function threadTsFor(threadId: unknown, channel: string): string | null {
   if (typeof threadId !== 'string') return null;
   const parts = threadId.split(':');
   if (parts.length !== 3 || parts[0] !== 'slack' || parts[1] !== channel || parts[2] === '') return null;
   return parts[2];
 }
 
-function stripSlack(id: string): string {
+export function stripSlack(id: string): string {
   return id.startsWith('slack:') ? id.slice('slack:'.length) : id;
 }
 
@@ -164,7 +164,7 @@ function senderFor(db: Database.Database, messageId: string, hops: number): stri
 }
 
 /** First line of an error, without file paths or anything token-shaped, capped for the notice. */
-function shortMessage(err: unknown): string {
+export function shortMessage(err: unknown): string {
   const first = (err instanceof Error ? err.message : String(err)).split('\n')[0] ?? '';
   return first
     .replace(/xox[a-z]-[\w-]+/gi, '[redacted]')

@@ -53,12 +53,18 @@ payload/src/modules/slack-ui/clicks.ts -> src/modules/slack-ui/clicks.ts
 payload/src/modules/slack-ui/clicks.test.ts -> src/modules/slack-ui/clicks.test.ts
 payload/src/modules/slack-ui/post-card.ts -> src/modules/slack-ui/post-card.ts
 payload/src/modules/slack-ui/post-card.test.ts -> src/modules/slack-ui/post-card.test.ts
+payload/src/modules/slack-ui/ask.ts -> src/modules/slack-ui/ask.ts
+payload/src/modules/slack-ui/ask.test.ts -> src/modules/slack-ui/ask.test.ts
 payload/src/modules/slack-ui/notify.ts -> src/modules/slack-ui/notify.ts
 payload/src/modules/slack-ui/notify.test.ts -> src/modules/slack-ui/notify.test.ts
 payload/src/modules/slack-ui/registration.test.ts -> src/modules/slack-ui/registration.test.ts
 payload/src/modules/slack-ui/db/migrations.ts -> src/modules/slack-ui/db/migrations.ts
 payload/src/modules/slack-ui/db/kit-cards.ts -> src/modules/slack-ui/db/kit-cards.ts
 payload/src/modules/slack-ui/db/kit-cards.test.ts -> src/modules/slack-ui/db/kit-cards.test.ts
+payload/container/agent-runner/src/mcp-tools/ask.ts -> container/agent-runner/src/mcp-tools/ask.ts
+payload/container/agent-runner/src/mcp-tools/ask.test.ts -> container/agent-runner/src/mcp-tools/ask.test.ts
+payload/container/agent-runner/src/mcp-tools/ask.instructions.md -> container/agent-runner/src/mcp-tools/ask.instructions.md
+payload/container/agent-runner/src/mcp-tools/ask-registration.test.ts -> container/agent-runner/src/mcp-tools/ask-registration.test.ts
 payload/container/agent-runner/src/mcp-tools/post-card.ts -> container/agent-runner/src/mcp-tools/post-card.ts
 payload/container/agent-runner/src/mcp-tools/post-card.test.ts -> container/agent-runner/src/mcp-tools/post-card.test.ts
 payload/container/agent-runner/src/mcp-tools/post-card.instructions.md -> container/agent-runner/src/mcp-tools/post-card.instructions.md
@@ -79,6 +85,7 @@ Add this line at the end of `container/agent-runner/src/mcp-tools/index.ts`. Imp
 
 ```nc:append to:container/agent-runner/src/mcp-tools/index.ts
 import './post-card.js';
+import './ask.js';
 ```
 
 The container tool source is mounted into agent containers, so no image rebuild is needed. Restart the host so it loads the module: `bash setup/lib/restart.sh`.

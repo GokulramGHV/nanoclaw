@@ -12,4 +12,8 @@ describe('slack-ui registration', () => {
   it('the modules barrel registers the post_card delivery action', () => {
     expect(getDeliveryAction('post_card')).toBeDefined();
   });
+
+  it('the modules barrel registers the ask delivery action', () => {
+    expect(getDeliveryAction('ask')).toBeDefined();
+  });
 });

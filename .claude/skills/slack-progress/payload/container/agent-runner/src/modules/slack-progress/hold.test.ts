@@ -178,7 +178,7 @@ describe('mid-task message hold', () => {
 });
 
 describe('chat tools flush the hold before their own row', () => {
-  const NAMES = ['post_card', 'ask_user_question', 'send_card', 'send_message'];
+  const NAMES = ['post_card', 'ask', 'ask_user_question', 'send_card', 'send_message'];
   for (const name of NAMES) {
     for (const full of [name, `mcp__nanoclaw__${name}`]) {
       it(`${full}: the held text is in the outbox before the tool's own row`, () => {
