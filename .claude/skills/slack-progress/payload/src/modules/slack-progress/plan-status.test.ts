@@ -9,7 +9,10 @@ vi.mock('../../delivery.js', () => ({ registerDeliveryAction: vi.fn() }));
 vi.mock('../../db/messaging-groups.js', () => ({ getMessagingGroup: vi.fn() }));
 vi.mock('../../log.js', () => ({ log: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
 vi.mock('../typing/index.js', () => ({ pauseTypingRefreshAfterDelivery: vi.fn() }));
-vi.mock('../../container-runner.js', () => ({ isContainerRunning: () => false, getContainerStartedAtMs: () => undefined }));
+vi.mock('../../container-runner.js', () => ({
+  isContainerRunning: () => false,
+  getContainerStartedAtMs: () => undefined,
+}));
 vi.mock('./settings.js', () => ({ isEnabled: vi.fn() }));
 vi.mock('./db/progress.js', () => {
   const plans = new Map<string, any>();
