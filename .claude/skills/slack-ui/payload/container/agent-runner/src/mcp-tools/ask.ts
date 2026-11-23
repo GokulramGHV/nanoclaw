@@ -230,7 +230,7 @@ export const ask: McpToolDefinition = {
         who: {
           type: 'object',
           description:
-            'Who may answer besides the person you are talking to: users (Slack user ids, up to 20) or group (a Slack user group id), not both. Default: only the asker.',
+            'Who may answer, default only the person you are talking to. users (Slack user ids, up to 20): these people and the asker. group (a Slack user group id): only members of that group, and the asker only if a member. Not both.',
           properties: {
             users: { type: 'array', maxItems: 20, items: { type: 'string' } },
             group: { type: 'string' },

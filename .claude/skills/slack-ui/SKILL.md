@@ -20,7 +20,7 @@ This skill adds two tools for agents, `post_card` and `ask`, and the host code b
 **`ask`**
 
 - The agent calls `ask({ questions, who?, timeout? })`. One card carries up to 4 questions. Each question has 2 to 10 options, each with an optional short description, and can allow several choices (`multiSelect`) or a typed answer (`allowOther`).
-- By default only the person the agent is answering may answer. `who` names other users, or one Slack user group.
+- By default only the person the agent is answering may answer. `who.users` adds other users to that person. `who.group` replaces the person: only members of that Slack user group may answer, and the asker only if a member.
 - One Send button locks the card. It is refused with a private note until every question has an answer.
 - The tool waits up to `timeout` seconds (30 to 300, default 300) and returns the answer as text. If nobody answers in time, the card stays open and a late answer arrives as a normal `ask_answer` message that wakes the agent.
 - In a Slack chat `ask` replaces `ask_user_question`, which is hidden there. Other channels keep `ask_user_question` and do not see `ask`.
@@ -118,6 +118,10 @@ import './post-card.js';
 import './ask.js';
 ```
 
+### Upgrading from the earlier slack-ui
+
+An install made from the earlier step-1 version of this skill has files this version no longer ships: `src/modules/slack-ui/render.ts`, `src/modules/slack-ui/rules.ts`, `src/modules/slack-ui/db/ui-cards.ts` and their tests (`render.test.ts`, `rules.test.ts`, `db/ui-cards.test.ts`). Delete them. Left in place they are dead code and may fail the build or the tests. The directive engine has no removal directive, so this is a manual step.
+
 The container tool source is mounted into agent containers, so no image rebuild is needed. Restart the host so it loads the module: `bash setup/lib/restart.sh`.
 
 ## Validate
@@ -153,8 +157,13 @@ A template is two files in one of the agent group's plugin folders, at `groups/<
   "version": 2,
   "data": {
     "title": { "type": "string", "required": true, "maxLength": 150 },
-    "items": { "type": "array", "maxItems": 10, "items": {
-      "name": { "type": "string", "required": true, "maxLength": 60 } } }
+    "items": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "name": { "type": "string", "required": true, "maxLength": 60 }
+      }
+    }
   },
   "access": { "byId": { "pick": "owner", "create": "owner" } },
   "openui": "demo-request.oui"
@@ -283,6 +292,7 @@ A template with `version: 1`, or no version, is the old JSON block format. `post
 **A press answers "Please answer every question first."** An `ask` card needs an answer to every question before Send works.
 
 **The card does not post.** The agent receives a system message starting `post_card failed:` with the reason. Common reasons:
+
 - The chat is not a Slack chat. Cards can only be posted into a messaging group whose channel type is Slack.
 - The template is missing. The `.json` and `.oui` files must be at `groups/<folder>/plugins/<plugin>/cards/` for the agent group that posts it.
 - The template uses the old JSON block format, or is invalid, or the data does not match its `data` schema. The message lists the problems.

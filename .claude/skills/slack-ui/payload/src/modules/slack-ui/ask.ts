@@ -22,7 +22,7 @@ import { requestWake } from '../../request-wake.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 import { getCardById } from './db/kit-cards.js';
-import { isDuplicate, takeEventContext } from './events.js';
+import { isDuplicate, noteEventContext, takeEventContext } from './events.js';
 import { kit, registerCardEventHandler } from './kit.js';
 import { readInboundSender, shortMessage, stripSlack, threadTsFor } from './post-card.js';
 import { slackClientForToken } from './slack-client.js';
@@ -349,16 +349,22 @@ export async function writeAskAnswer(event: CardEvent, _stored?: CardRecord): Pr
       ...(otherText ? { other: otherText } : {}),
     };
   });
-  await writeAskRow(
-    session,
-    {
-      channel: event.card.channel,
-      threadId: event.card.threadTs ? `slack:${event.card.channel}:${event.card.threadTs}` : null,
-    },
-    questionId,
-    { user: { id: event.user, name: ctx?.userName ?? '' }, answers },
-    true,
-  );
+  try {
+    await writeAskRow(
+      session,
+      {
+        channel: event.card.channel,
+        threadId: event.card.threadTs ? `slack:${event.card.channel}:${event.card.threadTs}` : null,
+      },
+      questionId,
+      { user: { id: event.user, name: ctx?.userName ?? '' }, answers },
+      true,
+    );
+  } catch (err) {
+    // The kit retries a failed delivery; keep the noted name for that retry.
+    if (ctx) noteEventContext(event.card.channel, event.card.ts, event.user, ctx);
+    throw err;
+  }
 }
 
 registerCardEventHandler('ask', writeAskAnswer);
