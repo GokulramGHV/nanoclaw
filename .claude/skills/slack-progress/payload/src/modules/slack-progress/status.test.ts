@@ -3,11 +3,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../channels/slack-lib.js', () => ({ slackCall: vi.fn() }));
 vi.mock('../../log.js', () => ({ log: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
 vi.mock('../typing/index.js', () => ({ pauseTypingRefreshAfterDelivery: vi.fn() }));
+const previewHooks = vi.hoisted(
+  () => [] as Array<(batch: { kind: string; content: string }[], s: { id: string }) => void>,
+);
+vi.mock('../../delivery.js', () => ({
+  registerDeliveryBatchPreview: vi.fn((fn: (typeof previewHooks)[number]) => void previewHooks.push(fn)),
+}));
 
 import { slackCall } from '../../channels/slack-lib.js';
 import { log } from '../../log.js';
 import { pauseTypingRefreshAfterDelivery } from '../typing/index.js';
+import './wake-status.js';
 import {
+  clearStatusAfterStream,
   clearWakeStatus,
   clearWorkingStatus,
   loadingLines,
@@ -18,6 +26,7 @@ import {
   startWakeStatus,
   statusText,
   STATUS_REFRESH_MS,
+  STATUS_STALE_MS,
   WAKE_DELAY_MS,
   WAKE_MAX_MS,
 } from './status.js';
@@ -57,12 +66,7 @@ describe('working status', () => {
   });
 
   it('rotates the real step first, then playful lines', () => {
-    expect(loadingLines('is working: Count lines', true, ['a', 'b', 'c', 'd'])).toEqual([
-      'Count lines',
-      'a',
-      'b',
-      'c',
-    ]);
+    expect(loadingLines('is working: Count lines', true, ['a', 'b', 'c', 'd'])).toEqual(['Count lines', 'a', 'b', 'c']);
     expect(loadingLines('is working', false, ['a', 'b', 'c', 'd', 'e', 'f'])).toEqual(['a', 'b', 'c', 'd', 'e']);
   });
 
@@ -152,10 +156,79 @@ describe('wake status', () => {
     expect(lines()[1]).toEqual(['Count lines', ...first.slice(0, 3)]);
   });
 
-  it('does not replace a status a turn already owns', async () => {
+  it("does not replace a status a turn already owns, but puts it back after the new message's typing tick", async () => {
     setWorkingStatus('s1', 'turn1', target, 'Reading');
     startWakeStatus('s1', target);
     await vi.advanceTimersByTimeAsync(WAKE_DELAY_MS);
+    expect(statuses()).toEqual(['is working: Reading', 'is working: Reading']);
+  });
+
+  it('a later message extends the wake status cap', async () => {
+    startWakeStatus('s1', target);
+    await vi.advanceTimersByTimeAsync(WAKE_MAX_MS - 1000);
+    startWakeStatus('s1', target);
+    await vi.advanceTimersByTimeAsync(WAKE_DELAY_MS + STATUS_REFRESH_MS * 2);
+    expect(statuses().at(-1)).toBe('is working');
+    await vi.advanceTimersByTimeAsync(WAKE_MAX_MS);
+    expect(statuses().at(-1)).toBe('');
+  });
+
+  it('a card-only turn: any non-progress outbound row clears the wake status', async () => {
+    startWakeStatus('s1', target);
+    await vi.advanceTimersByTimeAsync(WAKE_DELAY_MS);
+    previewHooks[0]!([{ kind: 'system', content: JSON.stringify({ action: 'post_card' }) }], { id: 's1' });
+    await vi.advanceTimersByTimeAsync(STATUS_REFRESH_MS * 3);
+    expect(statuses()).toEqual(['is working', '']);
+  });
+
+  it('a reaction-only or chat row clears it; progress and stream rows do not', async () => {
+    startWakeStatus('s1', target);
+    await vi.advanceTimersByTimeAsync(WAKE_DELAY_MS);
+    previewHooks[0]!(
+      [
+        { kind: 'system', content: JSON.stringify({ action: 'progress' }) },
+        { kind: 'system', content: JSON.stringify({ action: 'stream_append' }) },
+        { kind: 'system', content: 'not json' },
+      ].slice(0, 2),
+      { id: 's1' },
+    );
+    expect(statuses()).toEqual(['is working']);
+    previewHooks[0]!([{ kind: 'system', content: JSON.stringify({ action: 'add_reaction' }) }], { id: 's1' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(statuses()).toEqual(['is working', '']);
+    startWakeStatus('s1', target);
+    await vi.advanceTimersByTimeAsync(WAKE_DELAY_MS);
+    previewHooks[0]!([{ kind: 'chat', content: '{}' }], { id: 's1' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(statuses().at(-1)).toBe('');
+  });
+
+  it('a turn status with no new progress row for 2 minutes stops refreshing and is cleared', async () => {
+    setWorkingStatus('s1', 'turn1', target, 'Reading');
+    await vi.advanceTimersByTimeAsync(STATUS_STALE_MS + STATUS_REFRESH_MS);
+    expect(statuses().at(-1)).toBe('');
+    const n = call.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(STATUS_REFRESH_MS * 5);
+    expect(call.mock.calls.length).toBe(n);
+  });
+
+  it('a progress row with the same text keeps the turn status alive past 2 minutes', async () => {
+    setWorkingStatus('s1', 'turn1', target, 'Reading');
+    await vi.advanceTimersByTimeAsync(STATUS_STALE_MS - 1000);
+    setWorkingStatus('s1', 'turn1', target, 'Reading');
+    await vi.advanceTimersByTimeAsync(STATUS_REFRESH_MS * 2);
+    expect(statuses().at(-1)).toBe('is working: Reading');
+  });
+
+  it('after a stream ends the status is cleared on the session chain, unless a turn owns it', async () => {
+    clearStatusAfterStream('s1', target);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(statuses()).toEqual(['']);
+    call.mockClear();
+    setWorkingStatus('s1', 'turn1', target, 'Reading');
+    await vi.advanceTimersByTimeAsync(0);
+    clearStatusAfterStream('s1', target);
+    await vi.advanceTimersByTimeAsync(0);
     expect(statuses()).toEqual(['is working: Reading']);
   });
 

@@ -7,13 +7,16 @@ import { botTokenKeyForInstance, slackCall } from '../../channels/slack-lib.js';
 import { envValue } from '../../env.js';
 import { log } from '../../log.js';
 import { closePlan, type PlanRow } from './db/progress.js';
+import { withRateLimitRetry } from './rate-limit.js';
 import { renderPlainSummary, renderSummary, type ProgressRow } from './render.js';
-import { isEnabled } from './settings.js';
 import { clearWorkingStatus } from './status.js';
 
-/** Redraw the plan as stopped. Throws on a Slack failure; the caller logs it. */
+/**
+ * Redraw the plan as stopped. Throws on a Slack failure; the caller logs it. This runs
+ * even when the group has been switched off since, so a plan is never left drawn as
+ * working. Each Slack call waits out a rate limit.
+ */
 async function redrawStopped(plan: PlanRow): Promise<void> {
-  if (!(await isEnabled(plan.agentGroupId))) return;
   const token = envValue(botTokenKeyForInstance(plan.instance));
   if (!token || !plan.messageTs) return;
   const state = JSON.parse(plan.stateJson) as ProgressRow;
@@ -24,20 +27,13 @@ async function redrawStopped(plan: PlanRow): Promise<void> {
     elapsedMs: Number.isFinite(spent) && spent > 0 ? spent : state.elapsedMs,
   };
   const base = { channel: plan.channelId, ts: plan.messageTs };
-  const draw = (pendingOk: boolean) => {
-    const r = renderSummary(row, { pendingOk });
-    return slackCall(token, 'chat.update', { ...base, text: r.text, blocks: r.blocks }, 'progress');
-  };
+  const update = (r: { text: string; blocks: unknown[] }) =>
+    withRateLimitRetry(() => slackCall(token, 'chat.update', { ...base, text: r.text, blocks: r.blocks }, 'progress'));
   try {
-    await draw(true);
+    await update(renderSummary(row));
   } catch {
-    // A pending card may have been refused; retry once without it, then fall back to plain text.
-    try {
-      await draw(false);
-    } catch {
-      const r = renderPlainSummary(row);
-      await slackCall(token, 'chat.update', { ...base, text: r.text, blocks: r.blocks }, 'progress');
-    }
+    // Slack may have refused the plan block; fall back to plain text.
+    await update(renderPlainSummary(row));
   }
 }
 

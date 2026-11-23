@@ -15,6 +15,8 @@ const MAX_DOING_CHARS = 100;
 export const WAKE_DELAY_MS = 700;
 /** A wake status with no plan behind it stops after this long; "Typing..." takes over again. */
 export const WAKE_MAX_MS = 3 * 60 * 1000;
+/** A turn's status stops refreshing when no progress row for the turn has arrived for this long. */
+export const STATUS_STALE_MS = 120000;
 /** Turn ids for the status shown between routing and the turn's first progress row. */
 const WAKE_PREFIX = 'wake:';
 
@@ -30,6 +32,8 @@ interface Active extends StatusTarget {
   lines: string[];
   playful: string[];
   since: number;
+  /** Last time a progress row for this turn (or wake message) asked for the status. */
+  touched: number;
   timer: ReturnType<typeof setInterval>;
 }
 
@@ -144,6 +148,7 @@ export function setWorkingStatus(sessionId: string, turnId: string, target: Stat
   try {
     const text = statusText(doing);
     const cur = active.get(sessionId);
+    if (cur && cur.turnId === turnId) cur.touched = Date.now();
     if (cur && cur.turnId === turnId && cur.text === text) return;
     if (cur) clearInterval(cur.timer);
     const hasLabel = text !== statusText(null);
@@ -157,10 +162,14 @@ export function setWorkingStatus(sessionId: string, turnId: string, target: Stat
       playful,
       lines: loadingLines(text, hasLabel, playful),
       since: cur && cur.turnId === turnId ? cur.since : Date.now(),
+      touched: Date.now(),
       timer: setInterval(() => {
         const now = active.get(sessionId);
         if (now !== a) return;
-        if (a.turnId.startsWith(WAKE_PREFIX) && Date.now() - a.since > WAKE_MAX_MS) {
+        const wake = a.turnId.startsWith(WAKE_PREFIX);
+        // A turn whose rows stopped arriving (its container died) must not keep a status alive.
+        const expired = wake ? Date.now() - a.since > WAKE_MAX_MS : Date.now() - a.touched > STATUS_STALE_MS;
+        if (expired) {
           clearWorkingStatus(sessionId, a.turnId);
           return;
         }
@@ -200,7 +209,13 @@ export function startWakeStatus(sessionId: string, target: StatusTarget): void {
     const timer = setTimeout(() => {
       wakeTimers.delete(sessionId);
       const cur = active.get(sessionId);
-      if (cur && !cur.turnId.startsWith(WAKE_PREFIX)) return;
+      if (cur && !cur.turnId.startsWith(WAKE_PREFIX)) {
+        // A turn owns the status. The new message's typing tick may have replaced it, so put it back.
+        refresh(sessionId, cur);
+        return;
+      }
+      // A later message extends the wake status's cap.
+      if (cur) cur.since = Date.now();
       setWorkingStatus(sessionId, cur?.turnId ?? `${WAKE_PREFIX}${Date.now()}`, target, null);
     }, WAKE_DELAY_MS);
     timer.unref();
@@ -222,5 +237,19 @@ export function clearWakeStatus(sessionId: string): void {
     if (cur && cur.turnId.startsWith(WAKE_PREFIX)) clearWorkingStatus(sessionId, cur.turnId);
   } catch (err) {
     log.warn('slack-progress: wake status clear failed', { sessionId, err: String(err) });
+  }
+}
+
+/**
+ * A stream ended and Slack leaves the status as it was, so clear it, unless a turn or
+ * wake status owns it (its own refresh and clear handle that). Runs on the session's
+ * status chain so it cannot overtake a refresh. Never throws.
+ */
+export function clearStatusAfterStream(sessionId: string, target: StatusTarget): void {
+  try {
+    if (active.has(sessionId)) return;
+    send(sessionId, target, '');
+  } catch (err) {
+    log.warn('slack-progress: status clear after stream failed', { sessionId, err: String(err) });
   }
 }

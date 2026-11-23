@@ -2,11 +2,13 @@ import { describe, expect, it, vi } from 'vitest';
 
 const actions: string[] = [];
 const interceptors: unknown[] = [];
+const previews: unknown[] = [];
 const migrations: string[] = [];
 
 vi.mock('../../delivery.js', () => ({
   registerDeliveryAction: vi.fn((name: string) => void actions.push(name)),
   registerChatDeliveryInterceptor: vi.fn((fn: unknown) => void interceptors.push(fn)),
+  registerDeliveryBatchPreview: vi.fn((fn: unknown) => void previews.push(fn)),
 }));
 vi.mock('../../db/migrations/index.js', () => ({
   registerMigration: vi.fn((m: { name: string }) => void migrations.push(m.name)),
@@ -23,9 +25,10 @@ describe('slack-progress index', () => {
     const timer = vi.spyOn(globalThis, 'setInterval');
     await import('./index.js');
     expect(actions).toEqual(expect.arrayContaining(['progress', 'stream_append', 'stream_abort']));
-    // The wake-status clear first (it never handles a reply), then the stream interceptor.
-    expect(interceptors).toHaveLength(2);
-    expect((interceptors[0] as { name: string }).name).toBe('clearWakeOnReply');
+    // The stream interceptor handles replies; the wake-status clear watches every outbound row.
+    expect(interceptors).toHaveLength(1);
+    expect(previews).toHaveLength(1);
+    expect((previews[0] as { name: string }).name).toBe('clearWakeOnOutbound');
     expect(migrations).toContain('module:slack-progress:create-tables');
     expect(wakeProviders).toContain('slack-progress');
     expect(timer).toHaveBeenCalledWith(expect.any(Function), 30000);

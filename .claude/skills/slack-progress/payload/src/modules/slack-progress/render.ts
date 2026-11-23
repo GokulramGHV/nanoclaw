@@ -97,22 +97,19 @@ function bulletSection(head: string, titles: string[]): unknown {
 
 /**
  * The working view: one standalone task card per step (standalone cards render open,
- * a `plan` block does not). With `pendingOk` false (Slack refused a pending card),
- * steps not started yet are listed in one small grey line instead.
+ * a `plan` block does not). Slack refuses a standalone card that has not started, so
+ * steps not started yet are listed in one small grey "Up next" line instead.
  */
-export function renderPlan(
-  row: ProgressRow,
-  opts: { pendingOk: boolean } = { pendingOk: true },
-): { text: string; blocks: unknown[] } {
+export function renderPlan(row: ProgressRow): { text: string; blocks: unknown[] } {
   const all = cards(row, 'working', Infinity);
-  const listed = opts.pendingOk ? all : all.filter((c) => c.status !== 'pending');
+  const listed = all.filter((c) => c.status !== 'pending');
   // Nothing started yet: show one open card for what the agent is doing now, so the
   // message is never just the grey "Up next" line.
   if (listed.length === 0) {
     const title = clip(row.doing ?? 'Getting started', TITLE_MAX) || 'Getting started';
     listed.push({ type: 'task_card', task_id: 'now', title, status: 'in_progress' });
   }
-  const waiting = opts.pendingOk ? [] : all.filter((c) => c.status === 'pending').map((c) => c.title);
+  const waiting = all.filter((c) => c.status === 'pending').map((c) => c.title);
   const shown = listed.slice(0, MAX_WORKING_CARDS);
   const active = row.todos.find((t) => t.status === 'in_progress')?.title;
   const text = escapeMrkdwn(clip(`Working: ${active ?? row.doing ?? '...'}`, 300));
@@ -143,21 +140,27 @@ function upNext(titles: string[]): string {
   return out;
 }
 
-/** Plain-text close for when Slack refuses the plan block, so a message is never left in the working state. */
-export function renderPlainSummary(row: ProgressRow): { text: string; blocks: unknown[] } {
-  const { text } = renderSummary(row, { pendingOk: false });
-  return { text, blocks: [{ type: 'section', text: { type: 'mrkdwn', text: escapeMrkdwn(text).slice(0, TEXT_MAX) } }] };
-}
-
-export function renderSummary(
-  row: ProgressRow,
-  opts: { pendingOk: boolean } = { pendingOk: true },
-): { text: string; blocks: unknown[] } {
-  const failed = row.outcome === 'error';
+function summaryHead(row: ProgressRow): string {
   const steps = row.todos.length;
-  const head = failed
+  return row.outcome === 'error'
     ? `Stopped after ${seconds(row.elapsedMs)}`
     : `Done in ${seconds(row.elapsedMs)}${steps > 0 ? `, ${steps} ${steps === 1 ? 'step' : 'steps'}` : ''}`;
+}
+
+/** Plain-text close for when Slack refuses the plan block, so a message is never left in the working state. */
+export function renderPlainSummary(row: ProgressRow): { text: string; blocks: unknown[] } {
+  const head = summaryHead(row);
+  // Titles are escaped once, inside the section, from the raw text.
+  const section = bulletSection(
+    head,
+    row.todos.map((t) => t.title),
+  ) as { text: { text: string } };
+  return { text: section.text.text.slice(0, TEXT_MAX), blocks: [section] };
+}
+
+export function renderSummary(row: ProgressRow): { text: string; blocks: unknown[] } {
+  const failed = row.outcome === 'error';
+  const head = summaryHead(row);
   let list = cards(row, row.outcome);
   // A turn stopped before any step started has only pending steps, and Slack draws a
   // plan like that with a spinner. Mark the first unfinished step as stopped instead.
@@ -165,8 +168,13 @@ export function renderSummary(
     const first = list.find((c) => c.status === 'pending');
     if (first) first.status = 'error';
   }
-  const held = opts.pendingOk ? [] : list.filter((c) => c.status === 'pending');
-  if (!opts.pendingOk) list = list.filter((c) => c.status !== 'pending');
+  // A finished turn whose steps never started has the same spinner problem, and
+  // "done" would be wrong for them: list them as not done instead of drawing a plan.
+  let held: Card[] = [];
+  if (!failed && list.length > 0 && list.every((c) => c.status === 'pending')) {
+    held = list;
+    list = [];
+  }
   // Keep the top-level text well inside Slack's 3000-character limit.
   const lines = row.todos.map((t) => escapeMrkdwn(clip(t.title, TITLE_MAX)));
   let text = head;

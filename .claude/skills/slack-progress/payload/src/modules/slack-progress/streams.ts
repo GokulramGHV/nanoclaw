@@ -18,7 +18,7 @@ import { getStream, upsertStream, type StreamRow } from './db/progress.js';
 import { a2aRooms } from './a2a-rooms.js';
 import { withRateLimitRetry } from './rate-limit.js';
 import { isEnabled } from './settings.js';
-import { clearWakeStatus } from './status.js';
+import { clearStatusAfterStream, clearWakeStatus } from './status.js';
 
 const NOTE_BELOW = '_Reply posted below._';
 
@@ -29,19 +29,12 @@ function call(token: string, method: string, body: Record<string, unknown>): Pro
 
 /**
  * Clear the assistant "Typing..." status after a stream ends. A normal post clears it in
- * Slack, a stream does not. Best effort: not awaited, errors are logged and ignored.
+ * Slack, a stream does not. Goes through the status module so it never overtakes the
+ * turn's own status refresh, and is skipped while a turn owns the status.
  */
 function clearTypingStatus(row: StreamRow, token: string): void {
   if (!row.threadTs) return;
-  const channel_id = row.channelId;
-  const thread_ts = row.threadTs;
-  void (async () => {
-    try {
-      await slackCall(token, 'assistant.threads.setStatus', { channel_id, thread_ts, status: '' }, 'stream');
-    } catch (err) {
-      log.warn('slack-progress: could not clear typing status', { streamId: row.streamId, err: String(err) });
-    }
-  })();
+  clearStatusAfterStream(row.sessionId, { token, channel: row.channelId, threadTs: row.threadTs });
 }
 
 const chains = new Map<string, Promise<unknown>>();

@@ -32,15 +32,12 @@ interface Live {
 
 const live = new Map<string, Live>();
 const chains = new Map<string, Promise<void>>();
-/** Slack may answer invalid_blocks to a pending task card: remember it for this process. */
-let pendingOk = true;
 
 /** Test hook: forget all in-memory state. */
 export function resetPlanState(): void {
   for (const l of live.values()) if (l.timer) clearTimeout(l.timer);
   live.clear();
   chains.clear();
-  pendingOk = true;
   resetStatusState();
 }
 
@@ -84,31 +81,20 @@ export function parseProgressRow(content: Record<string, unknown>): ProgressRow 
   };
 }
 
-function isInvalidBlocks(err: unknown): boolean {
-  return err instanceof Error && err.name === 'SlackApiError' && err.message.includes('invalid_blocks');
-}
-
-/** Send one post or update; on invalid_blocks with a pending card, retry once without pending cards. */
+/**
+ * Send one post or update. `wanted` is checked right before each Slack call, so a draw
+ * that slept through a rate-limit wait never lands after its plan was closed.
+ */
 async function send(
   method: 'chat.postMessage' | 'chat.update',
   token: string,
   base: Record<string, unknown>,
   row: ProgressRow,
+  wanted: () => boolean = () => true,
 ): Promise<Record<string, unknown>> {
-  const build = () => {
-    const r = row.outcome === 'working' ? renderPlan(row, { pendingOk }) : renderSummary(row, { pendingOk });
-    return { ...base, text: r.text, blocks: r.blocks };
-  };
-  try {
-    return await withRateLimitRetry(() => slackCall(token, method, build(), 'progress'));
-  } catch (err) {
-    if (pendingOk && isInvalidBlocks(err) && row.todos.some((t) => t.status === 'pending')) {
-      pendingOk = false;
-      log.warn('slack-progress: Slack refused a pending task card, listing waiting steps as text');
-      return await withRateLimitRetry(() => slackCall(token, method, build(), 'progress'));
-    }
-    throw err;
-  }
+  const r = row.outcome === 'working' ? renderPlan(row) : renderSummary(row);
+  const payload = { ...base, text: r.text, blocks: r.blocks };
+  return await withRateLimitRetry(async () => (wanted() ? await slackCall(token, method, payload, 'progress') : {}));
 }
 
 async function persist(turnId: string, entry: Live, messageTs: string, row: ProgressRow, closed: boolean) {
@@ -132,7 +118,7 @@ async function draw(turnId: string, ts: string): Promise<void> {
   const row = entry.latest;
   entry.lastDrawMs = Date.now();
   try {
-    await send('chat.update', entry.token, { channel: entry.channel, ts }, row);
+    await send('chat.update', entry.token, { channel: entry.channel, ts }, row, () => !entry.closed);
     if (entry.closed) return;
     await persist(turnId, entry, ts, row, false);
   } catch (err) {

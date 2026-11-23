@@ -1,10 +1,13 @@
 /**
  * Sweep for plans and streams left open when a container died. Anything silent
  * for 120000 ms whose session has no running container is closed: the plan is
- * redrawn as stopped, and the stream is ended with a short note. Groups where
- * the feature is off get no Slack calls. The sweep never throws.
+ * redrawn as stopped, and the stream is ended with a short note. A plan whose
+ * last update is older than the session's current container is orphaned too, even
+ * though a container runs: that container never wrote to it. A plan is redrawn even
+ * when its group has since been switched off, so it never stays drawn as working;
+ * streams of such groups get no Slack calls. The sweep never throws.
  */
-import { isContainerRunning } from '../../container-runner.js';
+import { getContainerStartedAtMs, isContainerRunning } from '../../container-runner.js';
 import { getSession } from '../../db/sessions.js';
 import { log } from '../../log.js';
 import { listStale, upsertStream, type PlanRow, type StreamRow } from './db/progress.js';
@@ -16,8 +19,15 @@ export const STALE_MS = 120000;
 export const SWEEP_INTERVAL_MS = 30000;
 const NOTE_INTERRUPTED = '_Reply interrupted._';
 
+/** The plan was last touched before the session's current container started. */
+function outlivedByContainer(plan: PlanRow): boolean {
+  const startedAt = getContainerStartedAtMs(plan.sessionId);
+  const updated = Date.parse(plan.updatedAt);
+  return startedAt !== undefined && Number.isFinite(updated) && updated < startedAt;
+}
+
 async function sweepPlan(plan: PlanRow): Promise<void> {
-  if (isContainerRunning(plan.sessionId)) return;
+  if (isContainerRunning(plan.sessionId) && !outlivedByContainer(plan)) return;
   await stopPlan(plan);
 }
 

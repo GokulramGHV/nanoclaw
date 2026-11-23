@@ -5,7 +5,7 @@ vi.mock('../../channels/slack-lib.js', () => ({
   botTokenKeyForInstance: (i: string) => (i === 'slack' ? 'SLACK_BOT_TOKEN' : 'SLACK_BOT_TOKEN_X'),
 }));
 vi.mock('../../env.js', async (orig) => ({ ...(await orig<typeof import('../../env.js')>()), envValue: vi.fn() }));
-vi.mock('../../container-runner.js', () => ({ isContainerRunning: vi.fn() }));
+vi.mock('../../container-runner.js', () => ({ isContainerRunning: vi.fn(), getContainerStartedAtMs: vi.fn() }));
 vi.mock('../../db/sessions.js', () => ({ getSession: vi.fn() }));
 vi.mock('../../log.js', () => ({ log: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
 vi.mock('./settings.js', () => ({ isEnabled: vi.fn() }));
@@ -18,11 +18,12 @@ vi.mock('./db/progress.js', () => ({
 }));
 
 import { slackCall } from '../../channels/slack-lib.js';
-import { isContainerRunning } from '../../container-runner.js';
+import { getContainerStartedAtMs, isContainerRunning } from '../../container-runner.js';
 import { getSession } from '../../db/sessions.js';
 import { envValue } from '../../env.js';
 import { log } from '../../log.js';
 import * as progressDb from './db/progress.js';
+import { rateLimit } from './rate-limit.js';
 import { isEnabled } from './settings.js';
 import { clearWorkingStatus } from './status.js';
 import { endWithNote } from './streams.js';
@@ -75,6 +76,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.mocked(isEnabled).mockResolvedValue(true);
   vi.mocked(isContainerRunning).mockReturnValue(false);
+  vi.mocked(getContainerStartedAtMs).mockReturnValue(undefined);
   vi.mocked(getSession).mockResolvedValue({ id: 's1', agent_group_id: 'ag1' } as any);
   vi.mocked(envValue).mockReturnValue('xoxb-test');
   vi.mocked(slackCall).mockResolvedValue({ ok: true });
@@ -106,6 +108,26 @@ describe('sweepOnce', () => {
     expect(progressDb.upsertStream).not.toHaveBeenCalled();
   });
 
+  it('a plan last updated before the running container started is orphaned and stopped', async () => {
+    vi.mocked(isContainerRunning).mockReturnValue(true);
+    vi.mocked(getContainerStartedAtMs).mockReturnValue(NOW - 5000);
+    stale([planRow()], [streamRow()]);
+    await sweepOnce(NOW);
+    expect(vi.mocked(slackCall).mock.calls[0][1]).toBe('chat.update');
+    expect(progressDb.closePlan).toHaveBeenCalledWith('t1');
+    // Streams are not judged by container start: the running container may own them.
+    expect(endWithNote).not.toHaveBeenCalled();
+  });
+
+  it('a stale plan written by the running container (updated after it started) is left alone', async () => {
+    vi.mocked(isContainerRunning).mockReturnValue(true);
+    vi.mocked(getContainerStartedAtMs).mockReturnValue(Date.parse(old) - 5000);
+    stale([planRow()], []);
+    await sweepOnce(NOW);
+    expect(slackCall).not.toHaveBeenCalled();
+    expect(progressDb.closePlan).not.toHaveBeenCalled();
+  });
+
   it('open stream silent 120000 ms with no container is stopped with "reply interrupted" and marked stopped', async () => {
     stale([], [streamRow()]);
     await sweepOnce(NOW);
@@ -116,14 +138,32 @@ describe('sweepOnce', () => {
     );
   });
 
-  it('makes no Slack calls for a group where the feature is off', async () => {
+  it('a group switched off still gets its plan redrawn as stopped, but no stream note', async () => {
     vi.mocked(isEnabled).mockResolvedValue(false);
     stale([planRow()], [streamRow()]);
     await sweepOnce(NOW);
-    expect(slackCall).not.toHaveBeenCalled();
+    expect(vi.mocked(slackCall).mock.calls.map((c) => c[1])).toEqual(['chat.update']);
     expect(endWithNote).not.toHaveBeenCalled();
     expect(progressDb.closePlan).toHaveBeenCalledWith('t1');
     expect(progressDb.upsertStream).toHaveBeenCalledWith(expect.objectContaining({ status: 'stopped' }));
+  });
+
+  it('a rate-limited redraw waits and retries the same shape before falling back', async () => {
+    const saved = [...rateLimit.delaysMs];
+    rateLimit.delaysMs.splice(0, rateLimit.delaysMs.length, 1, 1, 1);
+    try {
+      const limited = Object.assign(new Error('slack chat.update failed: ratelimited'), { name: 'SlackApiError' });
+      vi.mocked(slackCall).mockRejectedValueOnce(limited).mockResolvedValue({ ok: true });
+      stale([planRow()], []);
+      await sweepOnce(NOW);
+      const calls = vi.mocked(slackCall).mock.calls as any[];
+      expect(calls).toHaveLength(2);
+      expect(calls[0][2].blocks).toEqual(calls[1][2].blocks);
+      expect(JSON.stringify(calls[1][2].blocks)).toContain('"type":"plan"');
+      expect(progressDb.closePlan).toHaveBeenCalledWith('t1');
+    } finally {
+      rateLimit.delaysMs.splice(0, rateLimit.delaysMs.length, ...saved);
+    }
   });
 
   it('sweep errors are logged, never thrown', async () => {

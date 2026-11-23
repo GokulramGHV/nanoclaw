@@ -36,7 +36,7 @@ import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { envValue } from '../../env.js';
 import { log } from '../../log.js';
 import * as progressDb from './db/progress.js';
-import { handleProgress, parseProgressRow, resetPlanState } from './plan.js';
+import { EDIT_INTERVAL_MS, handleProgress, parseProgressRow, resetPlanState } from './plan.js';
 import { rateLimit } from './rate-limit.js';
 import { isEnabled } from './settings.js';
 
@@ -172,7 +172,20 @@ describe('progress action', () => {
     expect(JSON.stringify(call.mock.calls[0][2])).toContain('"type":"plan"');
   });
 
-  it('invalid_blocks on a pending summary card retries with pendingOk false and remembers it', async () => {
+  it('the working view never sends a pending card, so no refusal is needed', async () => {
+    const todos = [
+      { title: 'Now', status: 'in_progress' },
+      { title: 'Step', status: 'pending' },
+    ];
+    await handleProgress(content({ todos }), session);
+    const posts = call.mock.calls.filter((c) => c[1] === 'chat.postMessage');
+    expect(posts).toHaveLength(1);
+    expect(JSON.stringify(posts[0][2])).not.toContain('"status":"pending"');
+    expect(JSON.stringify(posts[0][2])).toContain('Up next: Step');
+    expect(plans.get('turn1').messageTs).toBe('200.1');
+  });
+
+  it('a summary keeps pending steps in the plan block, in every process, from the first one', async () => {
     const pending = {
       outcome: 'done',
       todos: [
@@ -182,41 +195,30 @@ describe('progress action', () => {
     };
     await handleProgress(content(), session);
     call.mockClear();
-    const err = Object.assign(new Error('slack chat.update failed: invalid_blocks'), { name: 'SlackApiError' });
-    call.mockRejectedValueOnce(err).mockResolvedValue({ ok: true, ts: '200.1' });
     await handleProgress(content(pending), session);
-    expect(call).toHaveBeenCalledTimes(2);
+    expect(call).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(call.mock.calls[0][2])).toContain('"status":"pending"');
-    expect(JSON.stringify(call.mock.calls[1][2])).not.toContain('"status":"pending"');
-    // Remembered: a later turn goes straight to the fallback shape.
     await handleProgress(content({ turnId: 'turn2' }), session);
     call.mockClear();
     await handleProgress(content({ ...pending, turnId: 'turn2' }), session);
     expect(call).toHaveBeenCalledTimes(1);
-    expect(JSON.stringify(call.mock.calls[0][2])).not.toContain('"status":"pending"');
+    expect(JSON.stringify(call.mock.calls[0][2])).toContain('"status":"pending"');
   });
 
-  it('invalid_blocks on a pending working card retries the post with an Up next line', async () => {
-    const err = Object.assign(new Error('slack chat.postMessage failed: invalid_blocks'), { name: 'SlackApiError' });
-    let refused = false;
-    call.mockImplementation(async (_t: string, method: string) => {
-      if (method === 'chat.postMessage' && !refused) {
-        refused = true;
-        throw err;
-      }
-      return { ok: true, ts: '200.1' };
-    });
-    const todos = [
-      { title: 'Now', status: 'in_progress' },
-      { title: 'Step', status: 'pending' },
-    ];
-    await handleProgress(content({ todos }), session);
-    const posts = call.mock.calls.filter((c) => c[1] === 'chat.postMessage');
-    expect(posts).toHaveLength(2);
-    expect(JSON.stringify(posts[0][2])).toContain('"status":"pending"');
-    expect(JSON.stringify(posts[1][2])).not.toContain('"status":"pending"');
-    expect(JSON.stringify(posts[1][2])).toContain('Up next: Step');
-    expect(plans.get('turn1').messageTs).toBe('200.1');
+  it('a draw that sleeps through a rate limit does not land after a new turn closed its plan', async () => {
+    await handleProgress(content(), session);
+    await vi.advanceTimersByTimeAsync(EDIT_INTERVAL_MS);
+    call.mockClear();
+    const limited = Object.assign(new Error('slack chat.update failed: ratelimited'), { name: 'SlackApiError' });
+    call.mockRejectedValueOnce(limited).mockResolvedValue({ ok: true, ts: '200.1' });
+    const oldDraw = handleProgress(content({ doing: 'Changed' }), session);
+    await vi.advanceTimersByTimeAsync(10);
+    await handleProgress(content({ turnId: 'turn2' }), session);
+    await vi.advanceTimersByTimeAsync(rateLimit.delaysMs[0]);
+    await oldDraw;
+    const updates = call.mock.calls.filter((c) => c[1] === 'chat.update');
+    expect(updates).toHaveLength(2);
+    expect((updates[1][2] as { text: string }).text).toContain('Stopped after');
   });
 
   it('a refused final update falls back to a plain text summary and still closes', async () => {
