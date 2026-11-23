@@ -33,6 +33,13 @@ describe('describeTool', () => {
     expect(describeTool('mcp__github__get_repo', {})).toBe('Using github');
     expect(describeTool('Unknown', {})).toBe('Working');
   });
+  test('built-in tools get their own labels, never the server name', () => {
+    expect(describeTool('mcp__nanoclaw__ask', {})).toBe('Asking a question');
+    expect(describeTool('mcp__nanoclaw__post_card', {})).toBe('Posting a card');
+    expect(describeTool('mcp__nanoclaw__send_message', {})).toBe('Writing a message');
+    expect(describeTool('mcp__nanoclaw__some_new_tool', {})).toBe('Working');
+    expect(describeTool('mcp__nanoclaw__constructor', {})).toBe('Working');
+  });
   test('never leaks the command', () => {
     expect(describeTool('Bash', { command: 'cat /secret/path' })).toBe('Running a command');
   });
