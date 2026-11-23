@@ -2,7 +2,7 @@
  * Progress seam. Two small hooks a module can register into:
  *
  * - An observer gets normalized progress events from the provider and the
- *   poll loop: turn started, to-do list replaced, tool started, text delta,
+ *   poll loop: turn started, to-do list replaced, tool started, tool result, text delta,
  *   turn ended.
  * - A chat row decorator may add fields to the content of a `chat` row
  *   written for a complete <message> block. It can never replace `text`.
@@ -28,7 +28,9 @@ export interface ProgressTodo {
 export type ProgressEvent =
   | { type: 'turn_start'; routing: RoutingContext; messages: MessageInRow[] }
   | { type: 'todos'; todos: ProgressTodo[] }
-  | { type: 'tool'; name: string; input: Record<string, unknown> }
+  | { type: 'tool'; name: string; input: Record<string, unknown>; id?: string }
+  /** The text a main-agent tool call returned, matched to its `tool` event by `id`. */
+  | { type: 'tool_result'; id: string; text: string }
   | { type: 'text_delta'; text: string }
   | { type: 'turn_end'; outcome: 'done' | 'error' };
 

@@ -110,8 +110,8 @@ describe('translateEvents progress events', () => {
     );
     const types = await drive();
     expect(seen).toEqual([
-      { type: 'tool', name: 'Bash', input: { command: 'ls', description: 'List files' } },
-      { type: 'tool', name: 'TodoWrite', input: { todos } },
+      { type: 'tool', name: 'Bash', input: { command: 'ls', description: 'List files' }, id: 't1' },
+      { type: 'tool', name: 'TodoWrite', input: { todos }, id: 't2' },
       { type: 'todos', todos },
     ]);
     // The text event is still yielded as before.
@@ -138,7 +138,44 @@ describe('translateEvents progress events', () => {
     await drive();
     expect(seen).toEqual([
       { type: 'text_delta', text: 'main' },
-      { type: 'tool', name: 'Read', input: { file_path: '/x' } },
+      { type: 'tool', name: 'Read', input: { file_path: '/x' }, id: 'm1' },
+    ]);
+  });
+
+  it('emits tool_result with the tool_use id and text, for the main agent only', async () => {
+    sdkMessages.push(
+      { type: 'system', subtype: 'init', session_id: 'sess-1' },
+      {
+        type: 'user',
+        parent_tool_use_id: null,
+        message: {
+          role: 'user',
+          content: [
+            { type: 'tool_result', tool_use_id: 'a', content: 'Task #4 created successfully: x' },
+            {
+              type: 'tool_result',
+              tool_use_id: 'b',
+              content: [
+                { type: 'text', text: 'Task #5 ' },
+                { type: 'text', text: 'created successfully: y' },
+              ],
+            },
+            { type: 'tool_result', tool_use_id: 'c', content: 'boom', is_error: true },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        parent_tool_use_id: 'task-1',
+        message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'z', content: 'sub' }] },
+      },
+      { type: 'user', parent_tool_use_id: null, message: { role: 'user', content: 'plain string' } },
+      { type: 'result', subtype: 'success', result: 'done' },
+    );
+    await drive();
+    expect(seen).toEqual([
+      { type: 'tool_result', id: 'a', text: 'Task #4 created successfully: x' },
+      { type: 'tool_result', id: 'b', text: 'Task #5 created successfully: y' },
     ]);
   });
 });

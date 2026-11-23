@@ -26,12 +26,32 @@ function log(msg: string): void {
   console.error(`[claude-provider] ${msg}`);
 }
 
+/** Tell the progress seam what each tool call returned, as plain text. */
+function emitToolResults(
+  content: Array<{ type?: string; tool_use_id?: string; content?: unknown; is_error?: boolean }>,
+): void {
+  for (const block of content) {
+    if (block.type !== 'tool_result' || !block.tool_use_id || block.is_error) continue;
+    const text =
+      typeof block.content === 'string'
+        ? block.content
+        : Array.isArray(block.content)
+          ? block.content
+              .map((b: { type?: string; text?: string }) =>
+                b?.type === 'text' && typeof b.text === 'string' ? b.text : '',
+              )
+              .join('')
+          : '';
+    emitProgress({ type: 'tool_result', id: block.tool_use_id, text: text.slice(0, 500) });
+  }
+}
+
 /** Tell the progress seam about each tool call, and the to-do list a TodoWrite carries. */
-function emitToolProgress(content: Array<{ type?: string; name?: string; input?: unknown }>): void {
+function emitToolProgress(content: Array<{ type?: string; name?: string; input?: unknown; id?: string }>): void {
   for (const block of content) {
     if (block.type !== 'tool_use' || !block.name) continue;
     const input = (block.input && typeof block.input === 'object' ? block.input : {}) as Record<string, unknown>;
-    emitProgress({ type: 'tool', name: block.name, input });
+    emitProgress({ type: 'tool', name: block.name, input, ...(block.id ? { id: block.id } : {}) });
     if (block.name === 'TodoWrite' && Array.isArray(input.todos)) {
       emitProgress({ type: 'todos', todos: input.todos as ProgressTodo[] });
     }
@@ -381,6 +401,10 @@ export class ClaudeProvider implements AgentProvider {
               .join('');
             if (text) yield { type: 'text', text };
           }
+        } else if (message.type === 'user') {
+          // Tool results come back as user messages; the progress seam learns what a call returned.
+          const content = (message as { message?: { content?: unknown } }).message?.content;
+          if (!fromSubagent && Array.isArray(content)) emitToolResults(content);
         } else if (message.type === 'result') {
           // `result` text exists only on subtype:"success"; error subtypes
           // (e.g. a non-retryable 403 billing_error) carry their message in

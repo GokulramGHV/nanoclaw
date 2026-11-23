@@ -271,6 +271,97 @@ describe('progress tracker', () => {
       expect(rows[rows.length - 1]!.todos).toEqual([{ title: 'b', status: 'completed' }]);
     });
 
+    describe('real ids from TaskCreate results', () => {
+      const createId = (subject: string, id: string): ProgressEvent => ({
+        type: 'tool',
+        name: 'TaskCreate',
+        input: { subject },
+        id,
+      });
+      const result = (id: string, text: string): ProgressEvent => ({ type: 'tool_result', id, text });
+      const created = (n: string, subject = 'x') => `Task #${n} created successfully: ${subject}`;
+      const last = (rows: ProgressRow[]) => rows[rows.length - 1]!.todos;
+
+      test('ids from results re-key steps, so updates by real id hit the right step', () => {
+        const { tracker, rows } = setup();
+        tracker.onEvent(start());
+        tracker.onEvent(createId('a', 'u1'));
+        tracker.onEvent(createId('b', 'u2'));
+        tracker.onEvent(result('u1', created('7', 'a')));
+        tracker.onEvent(result('u2', created('8', 'b')));
+        tracker.onEvent(update('8', 'completed'));
+        tracker.onEvent({ type: 'turn_end', outcome: 'done' });
+        expect(last(rows)).toEqual([
+          { title: 'a', status: 'pending' },
+          { title: 'b', status: 'completed' },
+        ]);
+      });
+
+      test('restart-like: counter at 0, SDK ids start at 4', () => {
+        const { tracker, rows } = setup();
+        tracker.onEvent(start());
+        tracker.onEvent(createId('a', 'u1'));
+        tracker.onEvent(createId('b', 'u2'));
+        tracker.onEvent(result('u1', created('4')));
+        tracker.onEvent(result('u2', created('5')));
+        tracker.onEvent(update('4', 'in_progress'));
+        tracker.onEvent(update('1', 'completed'));
+        tracker.onEvent({ type: 'turn_end', outcome: 'done' });
+        expect(last(rows)).toEqual([
+          { title: 'a', status: 'in_progress' },
+          { title: 'b', status: 'pending' },
+        ]);
+        // the counter stays above the real ids
+        const { tracker: t2, rows: r2 } = setup();
+        t2.onEvent(start());
+        t2.onEvent(createId('a', 'u1'));
+        t2.onEvent(result('u1', created('4')));
+        t2.onEvent(create('b'));
+        t2.onEvent(update('5', 'completed'));
+        t2.onEvent({ type: 'turn_end', outcome: 'done' });
+        expect(last(r2)).toEqual([
+          { title: 'a', status: 'pending' },
+          { title: 'b', status: 'completed' },
+        ]);
+      });
+
+      test('an unparseable result falls back to the counter id', () => {
+        const { tracker, rows } = setup();
+        tracker.onEvent(start());
+        tracker.onEvent(createId('a', 'u1'));
+        tracker.onEvent(result('u1', 'something else'));
+        tracker.onEvent(result('unknown', created('9')));
+        tracker.onEvent(update('1', 'completed'));
+        tracker.onEvent({ type: 'turn_end', outcome: 'done' });
+        expect(last(rows)).toEqual([{ title: 'a', status: 'completed' }]);
+      });
+
+      test('a result id that is another waiting step`s counter id swaps cleanly', () => {
+        const { tracker, rows } = setup();
+        tracker.onEvent(start());
+        tracker.onEvent(createId('a', 'u1'));
+        tracker.onEvent(createId('b', 'u2'));
+        tracker.onEvent(result('u1', created('2')));
+        tracker.onEvent(result('u2', created('1')));
+        tracker.onEvent(update('2', 'completed'));
+        tracker.onEvent({ type: 'turn_end', outcome: 'done' });
+        expect(last(rows)).toEqual([
+          { title: 'a', status: 'completed' },
+          { title: 'b', status: 'pending' },
+        ]);
+      });
+
+      test('TaskUpdate for an unknown id adds the step when it carries a subject, else is ignored', () => {
+        const { tracker, rows } = setup();
+        tracker.onEvent(start());
+        tracker.onEvent(update('3', 'completed'));
+        expect(rows).toHaveLength(0);
+        tracker.onEvent(update('3', 'in_progress', { subject: 'old step' }));
+        tracker.onEvent({ type: 'turn_end', outcome: 'done' });
+        expect(last(rows)).toEqual([{ title: 'old step', status: 'in_progress' }]);
+      });
+    });
+
     test('a Bash call then TaskUpdate keeps the Bash description', () => {
       const { tracker, rows, advance } = setup();
       tracker.onEvent(start());

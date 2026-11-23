@@ -86,6 +86,49 @@ export function createProgressTracker(deps: TrackerDeps): {
   // turn shows only the steps created or updated in that turn.
   const tasks = new Map<string, TaskStep>();
   let lastTaskId = 0;
+  // TaskCreate calls waiting for their result, by tool_use id -> the key their step has now.
+  // The result carries the SDK's real id; until it arrives the step sits under a counter id.
+  const pendingCreates = new Map<string, string>();
+
+  function nextFreeId(): string {
+    do lastTaskId += 1;
+    while (tasks.has(String(lastTaskId)));
+    return String(lastTaskId);
+  }
+
+  /** Never let the fallback counter sit below an id the SDK has used. */
+  function noteRealId(id: string): void {
+    const n = Number(id);
+    if (Number.isInteger(n) && n > lastTaskId) lastTaskId = n;
+  }
+
+  /** Move a step to another key, in `tasks`, in the open turn's shown set (order kept) and in pending creates. */
+  function rekey(from: string, to: string): void {
+    const step = tasks.get(from);
+    if (!step || from === to) return;
+    tasks.delete(from);
+    tasks.set(to, step);
+    for (const [useId, key] of pendingCreates) if (key === from) pendingCreates.set(useId, to);
+    if (turn && turn.shown.has(from)) {
+      turn.shown = new Set([...turn.shown].map((k) => (k === from ? to : k)));
+    }
+  }
+
+  function taskResult(useId: string, text: string): void {
+    const key = pendingCreates.get(useId);
+    if (key === undefined) return;
+    pendingCreates.delete(useId);
+    const real = /^Task #(\S+) created successfully/.exec(text)?.[1];
+    if (!real) return;
+    // Another step still waiting under this key moves out of the way first.
+    if (real !== key && tasks.has(real)) rekey(real, nextFreeId());
+    rekey(key, real);
+    noteRealId(real);
+    if (turn) {
+      syncTodos(turn);
+      flush(turn);
+    }
+  }
 
   function syncTodos(t: OpenTurn): void {
     const next: ProgressRow['todos'] = [];
@@ -99,20 +142,26 @@ export function createProgressTracker(deps: TrackerDeps): {
     }
   }
 
-  function taskEvent(name: string, input: Record<string, unknown>): void {
+  function taskEvent(name: string, input: Record<string, unknown>, useId?: string): void {
     if (name === 'TaskCreate') {
       const subject = typeof input.subject === 'string' ? input.subject : '';
-      lastTaskId += 1;
-      const id = String(lastTaskId);
+      const id = nextFreeId();
       tasks.set(id, { title: subject, status: 'pending' });
+      if (useId) pendingCreates.set(useId, id);
       if (turn) {
         turn.shown.add(id);
         syncTodos(turn);
       }
     } else if (name === 'TaskUpdate') {
       const id = typeof input.taskId === 'string' ? input.taskId : String(input.taskId ?? '');
-      const step = tasks.get(id);
-      if (!step) return;
+      let step = tasks.get(id);
+      if (!step) {
+        // Created by an earlier container: show it only when this update says what it is.
+        if (id === '' || typeof input.subject !== 'string' || !input.subject || input.status === 'deleted') return;
+        step = { title: input.subject, status: 'pending' };
+        tasks.set(id, step);
+        noteRealId(id);
+      }
       if (input.status === 'deleted') {
         tasks.delete(id);
       } else {
@@ -228,7 +277,7 @@ export function createProgressTracker(deps: TrackerDeps): {
         return;
       }
       case 'tool': {
-        taskEvent(e.name, e.input);
+        taskEvent(e.name, e.input, e.id);
         if (!turn) return;
         if (QUIET_TOOLS.has(e.name)) return;
         turn.toolCalls += 1;
@@ -238,6 +287,10 @@ export function createProgressTracker(deps: TrackerDeps): {
           turn.dirty = true;
         }
         flush(turn);
+        return;
+      }
+      case 'tool_result': {
+        taskResult(e.id, e.text);
         return;
       }
       case 'turn_end': {
