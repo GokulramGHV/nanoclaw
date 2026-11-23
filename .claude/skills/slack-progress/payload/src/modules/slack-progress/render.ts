@@ -159,6 +159,12 @@ export function renderSummary(
     ? `Stopped after ${seconds(row.elapsedMs)}`
     : `Done in ${seconds(row.elapsedMs)}${steps > 0 ? `, ${steps} ${steps === 1 ? 'step' : 'steps'}` : ''}`;
   let list = cards(row, row.outcome);
+  // A turn stopped before any step started has only pending steps, and Slack draws a
+  // plan like that with a spinner. Mark the first unfinished step as stopped instead.
+  if (failed && !list.some((c) => c.status === 'error')) {
+    const first = list.find((c) => c.status === 'pending');
+    if (first) first.status = 'error';
+  }
   const held = opts.pendingOk ? [] : list.filter((c) => c.status === 'pending');
   if (!opts.pendingOk) list = list.filter((c) => c.status !== 'pending');
   // Keep the top-level text well inside Slack's 3000-character limit.

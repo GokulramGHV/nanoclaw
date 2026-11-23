@@ -131,6 +131,12 @@ describe('renderPlan (working view)', () => {
 });
 
 describe('renderPlainSummary', () => {
+  it('a turn stopped before any step started marks the first step as stopped, so no spinner shows', () => {
+    const todos = three.map((x) => ({ ...x, status: 'pending' as const }));
+    const { blocks } = renderSummary(row({ todos, outcome: 'error' }));
+    expect(planOf(blocks).tasks.map((x) => x.status)).toEqual(['error', 'pending', 'pending']);
+  });
+
   it('is plain sections with no plan or card blocks', () => {
     const { text, blocks } = renderPlainSummary(row({ todos: three, outcome: 'done' }));
     expect(text.split('\n')[0]).toBe('Done in 42s, 3 steps');
