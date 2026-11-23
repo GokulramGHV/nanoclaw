@@ -224,8 +224,19 @@ export async function endWithNote(row: StreamRow, note: string): Promise<void> {
 /**
  * Remove a held stream's partial message, the way a stream abort does, so the full reply the
  * bridge posts next appears once. If the stream cannot be removed, end it with the note.
+ * The row is marked stopped at the end, so nothing handles the stream twice.
  */
-async function discardHeld(row: StreamRow): Promise<void> {
+export async function discardHeld(row: StreamRow): Promise<void> {
+  try {
+    await removeHeld(row);
+  } finally {
+    await save(row, { status: 'stopped', held: false }).catch((err) => {
+      log.warn('slack-progress: could not record discarded stream', { streamId: row.streamId, err: String(err) });
+    });
+  }
+}
+
+async function removeHeld(row: StreamRow): Promise<void> {
   const token = envValue(botTokenKeyForInstance(row.instance));
   if (!token || !row.streamTs) return;
   try {
@@ -237,10 +248,14 @@ async function discardHeld(row: StreamRow): Promise<void> {
   }
   clearTypingStatus(row, token);
   try {
-    await call(token, 'chat.delete', { channel: row.channelId, ts: row.streamTs });
+    await callOnce(token, 'chat.delete', { channel: row.channelId, ts: row.streamTs });
   } catch (err) {
     log.warn('slack-progress: could not delete held stream, marking it', { streamId: row.streamId, err: String(err) });
-    await call(token, 'chat.update', { channel: row.channelId, ts: row.streamTs, text: NOTE_BELOW }).catch(() => {});
+    try {
+      await callOnce(token, 'chat.update', { channel: row.channelId, ts: row.streamTs, markdown_text: NOTE_BELOW });
+    } catch (err2) {
+      log.warn('slack-progress: could not mark held stream', { streamId: row.streamId, err: String(err2) });
+    }
   }
 }
 
@@ -248,7 +263,12 @@ async function abortWork(content: Record<string, unknown>, session: Session): Pr
   const id = content.streamId as string;
   if (!(await isEnabled(session.agent_group_id))) return;
   const row = await getStream(id);
-  if (!row || row.sessionId !== session.id || row.status !== 'open') return;
+  if (!row || row.sessionId !== session.id) return;
+  if (row.status === 'failed' && row.held) {
+    await discardHeld(row);
+    return;
+  }
+  if (row.status !== 'open') return;
   const token = envValue(botTokenKeyForInstance(row.instance));
   if (!row.streamTs || !token) {
     await save(row, { status: 'failed' });
@@ -305,15 +325,19 @@ async function interceptWork(
   }
   const tail = finalText.slice(shown.length);
   const rest = tail.trim() === '' ? '' : tail;
+  let appendFailed = false;
   try {
     if (rest !== '') {
+      appendFailed = true;
       await callOnce(token, 'chat.appendStream', { channel: row.channelId, ts: row.streamTs, markdown_text: rest });
+      appendFailed = false;
     }
     await call(token, 'chat.stopStream', { channel: row.channelId, ts: row.streamTs });
     clearTypingStatus(row, token);
   } catch (err) {
     log.warn('slack-progress: could not finish stream', { streamId, err: String(err) });
-    const held = isRateLimited(err) && rest !== '';
+    // Held only when the tail append itself was rate limited; a limited stop keeps the full text shown.
+    const held = appendFailed && isRateLimited(err);
     await save(row, { status: 'failed', held });
     if (held) await discardHeld(row);
     else await endWithNote(row, NOTE_BELOW);

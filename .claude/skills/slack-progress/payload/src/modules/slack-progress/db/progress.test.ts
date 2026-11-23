@@ -80,7 +80,7 @@ describe('progress storage', () => {
     expect((await getPlan('turn-1'))!.closed).toBe(true);
   });
 
-  it('listStale returns only open, older rows', async () => {
+  it('listStale returns only open (and held) streams, older rows', async () => {
     const old = '2026-01-01T00:00:00.000Z';
     const fresh = '2026-01-01T01:00:00.000Z';
     await upsertPlan(plan({ turnId: 'old-open', updatedAt: old }));
@@ -89,10 +89,11 @@ describe('progress storage', () => {
     await upsertStream(stream({ streamId: 'old-open', updatedAt: old }));
     await upsertStream(stream({ streamId: 'old-stopped', updatedAt: old, status: 'stopped' }));
     await upsertStream(stream({ streamId: 'old-failed', updatedAt: old, status: 'failed' }));
+    await upsertStream(stream({ streamId: 'old-held', updatedAt: old, status: 'failed', held: true }));
     await upsertStream(stream({ streamId: 'fresh-open', updatedAt: fresh }));
 
     const stale = await listStale('2026-01-01T00:30:00.000Z');
     expect(stale.plans.map((p) => p.turnId)).toEqual(['old-open']);
-    expect(stale.streams.map((s) => s.streamId)).toEqual(['old-open']);
+    expect(stale.streams.map((s) => s.streamId).sort()).toEqual(['old-held', 'old-open']);
   });
 });

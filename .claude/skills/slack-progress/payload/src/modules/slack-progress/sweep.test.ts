@@ -10,7 +10,10 @@ vi.mock('../../db/sessions.js', () => ({ getSession: vi.fn() }));
 vi.mock('../../log.js', () => ({ log: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
 vi.mock('./settings.js', () => ({ isEnabled: vi.fn() }));
 vi.mock('./status.js', () => ({ clearWorkingStatus: vi.fn() }));
-vi.mock('./streams.js', () => ({ endWithNote: vi.fn(async () => undefined) }));
+vi.mock('./streams.js', () => ({
+  endWithNote: vi.fn(async () => undefined),
+  discardHeld: vi.fn(async () => undefined),
+}));
 vi.mock('./db/progress.js', () => ({
   listStale: vi.fn(),
   closePlan: vi.fn(async () => undefined),
@@ -26,7 +29,7 @@ import * as progressDb from './db/progress.js';
 import { rateLimit } from './rate-limit.js';
 import { isEnabled } from './settings.js';
 import { clearWorkingStatus } from './status.js';
-import { endWithNote } from './streams.js';
+import { discardHeld, endWithNote } from './streams.js';
 import { STALE_MS, sweepOnce } from './sweep.js';
 
 const NOW = Date.parse('2026-01-01T01:00:00Z');
@@ -66,6 +69,7 @@ const streamRow = (over: Record<string, unknown> = {}) => ({
   streamTs: '300.1',
   status: 'open',
   sentText: 'Hi',
+  held: false,
   updatedAt: old,
   createdAt: old,
   ...over,
@@ -136,6 +140,24 @@ describe('sweepOnce', () => {
     expect(progressDb.upsertStream).toHaveBeenCalledWith(
       expect.objectContaining({ streamId: 'st1', status: 'stopped' }),
     );
+  });
+
+  it('a held stream whose container is gone is discarded (stop and delete), not noted, and marked stopped', async () => {
+    stale([], [streamRow({ status: 'failed', held: true })]);
+    await sweepOnce(NOW);
+    expect(discardHeld).toHaveBeenCalledTimes(1);
+    expect(endWithNote).not.toHaveBeenCalled();
+    expect(progressDb.upsertStream).toHaveBeenCalledWith(
+      expect.objectContaining({ streamId: 'st1', status: 'stopped' }),
+    );
+  });
+
+  it('a held stream whose container still runs is left alone', async () => {
+    vi.mocked(isContainerRunning).mockReturnValue(true);
+    stale([], [streamRow({ status: 'failed', held: true })]);
+    await sweepOnce(NOW);
+    expect(discardHeld).not.toHaveBeenCalled();
+    expect(progressDb.upsertStream).not.toHaveBeenCalled();
   });
 
   it('a group switched off still gets its plan redrawn as stopped, but no stream note', async () => {

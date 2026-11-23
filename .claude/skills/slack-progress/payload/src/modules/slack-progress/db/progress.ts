@@ -181,7 +181,7 @@ export async function upsertStream(row: StreamRow): Promise<void> {
   );
 }
 
-/** Open plans and open streams last updated before `olderThanIso`. */
+/** Open plans, and open or held streams, last updated before `olderThanIso`. */
 export async function listStale(olderThanIso: string): Promise<{ plans: PlanRow[]; streams: StreamRow[] }> {
   const db = getDb();
   const plans = await db.all<PlanDbRow>(
@@ -189,7 +189,7 @@ export async function listStale(olderThanIso: string): Promise<{ plans: PlanRow[
     olderThanIso,
   );
   const streams = await db.all<StreamDbRow>(
-    "SELECT * FROM progress_streams WHERE status = 'open' AND updated_at < ? ORDER BY updated_at",
+    "SELECT * FROM progress_streams WHERE (status = 'open' OR (status = 'failed' AND held = 1)) AND updated_at < ? ORDER BY updated_at",
     olderThanIso,
   );
   return { plans: plans.map(planFromRow), streams: streams.map(streamFromRow) };

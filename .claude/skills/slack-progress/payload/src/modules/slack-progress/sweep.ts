@@ -13,7 +13,7 @@ import { log } from '../../log.js';
 import { listStale, upsertStream, type PlanRow, type StreamRow } from './db/progress.js';
 import { isEnabled } from './settings.js';
 import { stopPlan } from './stop.js';
-import { endWithNote } from './streams.js';
+import { discardHeld, endWithNote } from './streams.js';
 
 export const STALE_MS = 120000;
 export const SWEEP_INTERVAL_MS = 30000;
@@ -36,7 +36,8 @@ async function sweepStream(stream: StreamRow): Promise<void> {
   try {
     const session = await getSession(stream.sessionId);
     if (session && (await isEnabled(session.agent_group_id))) {
-      await endWithNote(stream, NOTE_INTERRUPTED);
+      if (stream.held) await discardHeld(stream);
+      else await endWithNote(stream, NOTE_INTERRUPTED);
     }
   } catch (err) {
     log.warn('slack-progress: could not end stale stream', { streamId: stream.streamId, err: String(err) });
