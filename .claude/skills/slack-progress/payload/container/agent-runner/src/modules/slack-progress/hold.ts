@@ -155,3 +155,21 @@ export function createHold(deps: HoldDeps): {
 
   return { onEvent, offer, barrier };
 }
+
+const CARD_TOOL = /(^|__)post_card$/;
+
+/**
+ * Observer for card tools that write their own row. Tool events fire before the tool
+ * runs, so held text for the turn's chat is written first and the card has its context.
+ * This lives here, not in the card tool, so the card skill never depends on this module.
+ */
+export function flushHoldOnCardTool(
+  hold: { barrier(platformId: string): Promise<void> },
+  currentPlatformId: () => string | null,
+): (e: ProgressEvent) => void {
+  return (e) => {
+    if (e.type !== 'tool' || !CARD_TOOL.test(e.name)) return;
+    const platformId = currentPlatformId();
+    if (platformId) void hold.barrier(platformId);
+  };
+}

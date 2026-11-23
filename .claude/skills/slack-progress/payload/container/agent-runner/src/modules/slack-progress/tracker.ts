@@ -77,6 +77,8 @@ export function createProgressTracker(deps: TrackerDeps): {
    * task list still has unfinished steps.
    */
   stepsOpen(platformId: string): boolean;
+  /** The chat the open turn answers, or null. */
+  currentPlatformId(): string | null;
 } {
   let turn: OpenTurn | null = null;
   // The agent's task list lives for the whole session, so it is kept outside the turn.
@@ -257,5 +259,5 @@ export function createProgressTracker(deps: TrackerDeps): {
     return t.todos.some((x) => x.status !== 'completed');
   }
 
-  return { onEvent, stepsOpen };
+  return { onEvent, stepsOpen, currentPlatformId: () => turn?.platformId ?? null };
 }

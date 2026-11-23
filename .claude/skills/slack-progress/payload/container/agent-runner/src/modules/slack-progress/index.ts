@@ -11,7 +11,7 @@ import {
   registerHoldBarrier,
   registerProgressObserver,
 } from '../../progress-seam.js';
-import { createHold } from './hold.js';
+import { createHold, flushHoldOnCardTool } from './hold.js';
 import { createStreamer, MARKER_PATH } from './streamer.js';
 import { createProgressTracker } from './tracker.js';
 
@@ -60,6 +60,7 @@ registerProgressObserver((e) => {
   streamer.onEvent(e);
   hold.onEvent(e);
 });
+registerProgressObserver(flushHoldOnCardTool(hold, () => tracker.currentPlatformId()));
 registerChatRowHold((row, write) => hold.offer(row, write));
 registerChatRowDecorator((row) => streamer.decorate(row));
 registerHoldBarrier((platformId) => hold.barrier(platformId));

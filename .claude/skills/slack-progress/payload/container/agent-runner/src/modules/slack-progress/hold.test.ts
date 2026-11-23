@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import type { MessageInRow } from '../../db/messages-in.js';
 import type { ChatRowInfo, ProgressEvent } from '../../progress-seam.js';
-import { createHold } from './hold.js';
+import { createHold, flushHoldOnCardTool } from './hold.js';
 import { createProgressTracker } from './tracker.js';
 import { createStreamer, type StreamAbortRow, type StreamAppendRow } from './streamer.js';
 
@@ -168,6 +168,31 @@ describe('mid-task message hold', () => {
     hold.onEvent(start());
     offer('slack:C1', 'held');
     await hold.barrier('slack:C2');
+    expect(written).toEqual([]);
+  });
+});
+
+describe('post_card tool event', () => {
+  it('flushes the latest held message for the turn chat before the card is written', async () => {
+    const { hold, offer, written } = setup({ value: true });
+    const observer = flushHoldOnCardTool(hold, () => 'slack:C1');
+    hold.onEvent(start());
+    offer('slack:C1', 'Here is the form:');
+    // The same event reaches every observer, hold first.
+    const e = tool('mcp__nanoclaw__post_card');
+    hold.onEvent(e);
+    observer(e);
+    await flush();
+    expect(written).toEqual(['Here is the form:']);
+  });
+
+  it('ignores other tools and a turn with no chat', async () => {
+    const { hold, offer, written } = setup({ value: true });
+    const observer = flushHoldOnCardTool(hold, () => null);
+    offer('slack:C1', 'held');
+    observer(tool('mcp__nanoclaw__post_card'));
+    observer(tool('Read'));
+    await flush();
     expect(written).toEqual([]);
   });
 });
