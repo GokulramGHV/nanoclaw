@@ -39,6 +39,26 @@ export function registerTools(tools: McpToolDefinition[]): void {
   }
 }
 
+const hides = new Map<string, Array<() => boolean>>();
+
+/**
+ * Hide a registered tool while `when()` is true. Checked on every ListTools and
+ * CallTool, so the answer can follow session state. A hidden tool is left out of
+ * the list and a call to it gets the same "Unknown tool" result as a missing
+ * tool. A tool with several hides is hidden when any of them says so. With no
+ * hides registered nothing changes.
+ */
+export function hideTool(name: string, when: () => boolean): void {
+  const list = hides.get(name);
+  if (list) list.push(when);
+  else hides.set(name, [when]);
+}
+
+function isHidden(name: string): boolean {
+  const list = hides.get(name);
+  return list !== undefined && list.some((when) => when());
+}
+
 /** Additive extension of an already-registered tool. All fields optional. */
 export interface ToolExtension {
   /**
@@ -128,13 +148,13 @@ export function createMcpServer(
   const server = new Server({ name: 'nanoclaw', version: '2.0.0' }, { capabilities: { tools: {} } });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: allTools.map((t) => t.tool),
+    tools: (hides.size === 0 ? allTools : allTools.filter((t) => !isHidden(t.tool.name))).map((t) => t.tool),
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request, context) => {
     const { name, arguments: args } = request.params;
     const tool = toolMap.get(name);
-    if (!tool) {
+    if (!tool || isHidden(name)) {
       return { content: [{ type: 'text', text: `Unknown tool: ${name}` }] };
     }
     return run(() => tool.handler(args ?? {}, { signal: context.signal }));

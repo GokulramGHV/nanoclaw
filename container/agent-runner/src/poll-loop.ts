@@ -31,6 +31,7 @@ import {
   type RoutingContext,
 } from './formatter.js';
 import { stripHarnessTagArtifacts } from './harness-tag-strip.js';
+import { isMessageClaimed } from './message-claims.js';
 import { chatRowDecoratorKeys, decorateChatRow, emitProgress, holdBarrier, holdChatRow } from './progress-seam.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
@@ -41,6 +42,11 @@ const ACTIVE_POLL_INTERVAL_MS = 500;
 
 /** Consecutive driver-classified failures before a fresh runner is required. */
 const MAILBOX_FAILURE_STREAK_EXIT = 10;
+
+/** Rows the agent may see: not a `system` response and not claimed by an MCP tool (message-claims.ts). */
+export function isAgentVisible(m: { id: string; kind: string }): boolean {
+  return m.kind !== 'system' && !isMessageClaimed(m.id);
+}
 
 function log(msg: string): void {
   console.error(`[poll-loop] ${msg}`);
@@ -127,8 +133,9 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
   let isFirstPoll = true;
   while (true) {
     if (config.signal?.aborted) return;
-    // Skip system messages — they're responses for MCP tools (e.g., ask_user_question)
-    const messages = getPendingMessages(isFirstPoll).filter((m) => m.kind !== 'system');
+    // Skip system messages — they're responses for MCP tools (e.g., ask_user_question),
+    // and messages an MCP tool has claimed to wait for itself (message-claims.ts)
+    const messages = getPendingMessages(isFirstPoll).filter(isAgentVisible);
     isFirstPoll = false;
     pollCount++;
 
@@ -507,8 +514,10 @@ export async function processQuery(
         // follow-up is also pending; otherwise they stay pending for a future
         // batch (mirrors the two-phase initial-batch selection in
         // db/messages-in.ts).
-        const hasFollowUpTrigger = pending.some((m) => m.kind !== 'system' && m.trigger === 1);
-        const newMessages = pending.filter((m) => m.kind !== 'system' && (m.trigger === 1 || hasFollowUpTrigger));
+        // Rows an MCP tool has claimed (message-claims.ts) are skipped the same way.
+        const visible = pending.filter(isAgentVisible);
+        const hasFollowUpTrigger = visible.some((m) => m.trigger === 1);
+        const newMessages = visible.filter((m) => m.trigger === 1 || hasFollowUpTrigger);
         if (newMessages.length === 0) return;
 
         // Accumulated context must not engage a warm query by itself.

@@ -10,7 +10,8 @@ import {
   isRunnerCommand,
   GENERIC_FAILURE_NOTICE,
 } from './formatter.js';
-import { processQuery } from './poll-loop.js';
+import { isAgentVisible, processQuery } from './poll-loop.js';
+import { claimMessage, releaseMessage } from './message-claims.js';
 import { MockProvider } from './providers/mock.js';
 import type { AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 
@@ -812,4 +813,23 @@ describe('task-run turn wiring (real processQuery)', () => {
     // slow runners the test died as a mute timeout instead of reaching the
     // diagnostic throw above (observed consistently on CI-hosted runners).
   }, 20_000);
+});
+
+describe('message claims in the poll loop', () => {
+  it('hides a claimed row from the agent until it is released', () => {
+    insertMessage('claim-1', 'webhook', { source: 'slack-ui', event: 'ask_answer' });
+    insertMessage('claim-2', 'chat', { sender: 'John', text: 'hi' });
+    insertMessage('claim-3', 'system', { action: 'x' });
+    const ids = () =>
+      getPendingMessages()
+        .filter(isAgentVisible)
+        .map((m) => m.id);
+    claimMessage('claim-1');
+    try {
+      expect(ids()).toEqual(['claim-2']);
+    } finally {
+      releaseMessage('claim-1');
+    }
+    expect(ids()).toEqual(['claim-1', 'claim-2']);
+  });
 });
