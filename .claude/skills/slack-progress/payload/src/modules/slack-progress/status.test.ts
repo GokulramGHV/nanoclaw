@@ -3,6 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../channels/slack-lib.js', () => ({ slackCall: vi.fn() }));
 vi.mock('../../log.js', () => ({ log: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
 vi.mock('../typing/index.js', () => ({ pauseTypingRefreshAfterDelivery: vi.fn() }));
+const container = vi.hoisted(() => ({ running: false, startedAt: undefined as number | undefined }));
+vi.mock('../../container-runner.js', () => ({
+  isContainerRunning: () => container.running,
+  getContainerStartedAtMs: () => container.startedAt,
+}));
 const previewHooks = vi.hoisted(
   () => [] as Array<(batch: { kind: string; content: string }[], s: { id: string }) => void>,
 );
@@ -210,6 +215,22 @@ describe('wake status', () => {
     const n = call.mock.calls.length;
     await vi.advanceTimersByTimeAsync(STATUS_REFRESH_MS * 5);
     expect(call.mock.calls.length).toBe(n);
+  });
+
+  it('a turn status stays while the same container runs a long silent tool call', async () => {
+    container.running = true;
+    container.startedAt = Date.now() - 1000;
+    try {
+      setWorkingStatus('s1', 'turn1', target, 'Reading');
+      await vi.advanceTimersByTimeAsync(STATUS_STALE_MS * 3);
+      expect(statuses().at(-1)).toBe('is working: Reading');
+      container.startedAt = Date.now(); // a newer container took over: the old turn is orphaned
+      await vi.advanceTimersByTimeAsync(STATUS_REFRESH_MS * 2);
+      expect(statuses().at(-1)).toBe('');
+    } finally {
+      container.running = false;
+      container.startedAt = undefined;
+    }
   });
 
   it('a progress row with the same text keeps the turn status alive past 2 minutes', async () => {

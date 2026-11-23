@@ -6,6 +6,7 @@
  * Everything here is best effort: errors are logged and never thrown.
  */
 import { slackCall } from '../../channels/slack-lib.js';
+import { getContainerStartedAtMs, isContainerRunning } from '../../container-runner.js';
 import { log } from '../../log.js';
 import { pauseTypingRefreshAfterDelivery } from '../typing/index.js';
 
@@ -143,6 +144,13 @@ function safePause(sessionId: string): void {
   }
 }
 
+function turnOrphaned(sessionId: string, touched: number): boolean {
+  if (Date.now() - touched <= STATUS_STALE_MS) return false;
+  if (!isContainerRunning(sessionId)) return true;
+  const started = getContainerStartedAtMs(sessionId);
+  return started !== undefined && started > touched;
+}
+
 /** Show the status for an open turn. Calls Slack only when the text changed. Never throws. */
 export function setWorkingStatus(sessionId: string, turnId: string, target: StatusTarget, doing: string | null): void {
   try {
@@ -167,8 +175,10 @@ export function setWorkingStatus(sessionId: string, turnId: string, target: Stat
         const now = active.get(sessionId);
         if (now !== a) return;
         const wake = a.turnId.startsWith(WAKE_PREFIX);
-        // A turn whose rows stopped arriving (its container died) must not keep a status alive.
-        const expired = wake ? Date.now() - a.since > WAKE_MAX_MS : Date.now() - a.touched > STATUS_STALE_MS;
+        // A turn whose rows stopped arriving because its container died must not keep a status
+        // alive. A long tool call or subagent run sends no rows either, so only expire when the
+        // container that sent the last row is gone (not running, or a newer one started since).
+        const expired = wake ? Date.now() - a.since > WAKE_MAX_MS : turnOrphaned(sessionId, a.touched);
         if (expired) {
           clearWorkingStatus(sessionId, a.turnId);
           return;
