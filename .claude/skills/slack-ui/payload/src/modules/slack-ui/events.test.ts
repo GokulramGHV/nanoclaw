@@ -118,6 +118,15 @@ describe('writeCardEvent', () => {
     expect('labels' in JSON.parse(write.mock.calls[0]![2].content).payload).toBe(false);
   });
 
+  it('adds stateLabels with $ stripped when the event has them, and no key otherwise', async () => {
+    await writeCardEvent(event({ stateLabels: { $size: 'Large', $tags: ['Alpha', 'Beta'] } }));
+    const payload = JSON.parse(write.mock.calls[0]![2].content).payload;
+    expect(payload.stateLabels).toEqual({ size: 'Large', tags: ['Alpha', 'Beta'] });
+    write.mockClear();
+    await writeCardEvent(event());
+    expect('stateLabels' in JSON.parse(write.mock.calls[0]![2].content).payload).toBe(false);
+  });
+
   it('keeps the noted context for a retry after a failed write, and drops it after success', async () => {
     noteEventContext('C1', '1.1', 'U2', { actionTs: '7.7' });
     write.mockRejectedValueOnce(new Error('disk full'));

@@ -243,10 +243,13 @@ A press on a button, feedback, or a form submit sends a message like `<webhook s
 - `template`: the template name.
 - `control`: the control's id (its statement name).
 - `value`: the pressed control's value. For a form submit it is an object of the submitted values, keyed by variable name without `$`.
-- `labels`: present when the press carried chosen options. The text the person saw for each chosen option, under the same names as `value` (a string for a select or radio, a list for checkboxes and multi-selects). Text, date and other fields have none. Use it, not `value`, when repeating a choice to people.
+- `labels`: present when the press carried chosen options. The shown text of the option(s) chosen in the pressed control or the submitted form fields, under the same names as `value` (a string for a select or radio, a list for checkboxes and multi-selects). Text, date and other fields have none.
+- `stateLabels`: the shown text for choices held in `state` (radios, checkboxes and selects set earlier on the card), under the same names as `state`. Values that match no option are left out.
 - `user`: `{ id, name }` of the person who pressed.
 - `state`: the card's current state after the press, with keys without `$` (`pick`, `choice`). A submit event holds the final ticks and inputs.
 - `locked`: `true` when this press locked the card.
+
+When telling a person what they chose, use `labels` and `stateLabels` rather than the raw values.
 
 Ticking a checkbox or typing in a box does not send an event on its own; the state arrives with the next button press.
 

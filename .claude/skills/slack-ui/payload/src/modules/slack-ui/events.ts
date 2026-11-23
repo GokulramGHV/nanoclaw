@@ -119,6 +119,7 @@ export async function writeCardEvent(event: CardEvent, stored?: CardRecord): Pro
           ...(event.control.labels ? { labels: stripDollar(event.control.labels) } : {}),
           user: { id: event.user, name: ctx?.userName ?? '' },
           state: stripDollar(event.state),
+          ...(event.stateLabels ? { stateLabels: stripDollar(event.stateLabels) } : {}),
           locked: event.locked !== undefined,
         },
       }),
