@@ -16,7 +16,7 @@ import type { OutboundMessage } from '../../mailbox/index.js';
 import type { Session } from '../../types.js';
 import { getStream, upsertStream, type StreamRow } from './db/progress.js';
 import { a2aRooms } from './a2a-rooms.js';
-import { withRateLimitRetry } from './rate-limit.js';
+import { isRateLimited, withRateLimitRetry } from './rate-limit.js';
 import { isEnabled } from './settings.js';
 import { clearStatusAfterStream, clearWakeStatus } from './status.js';
 
@@ -25,6 +25,16 @@ const NOTE_BELOW = '_Reply posted below._';
 /** One Slack call, retried when Slack answers ratelimited. */
 function call(token: string, method: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
   return withRateLimitRetry(() => slackCall(token, method, body, 'stream'));
+}
+
+/**
+ * One Slack append, never retried. A rate-limited append holds the stream: the row goes
+ * to `failed`, later appends see a non-open row and do nothing, and the finished reply's
+ * chat row ends the stream with a short note and is posted in full by the bridge. This
+ * keeps a sustained rate limit from queueing delayed appends behind the reply.
+ */
+function callOnce(token: string, method: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  return slackCall(token, method, body, 'stream');
 }
 
 /**
@@ -172,10 +182,15 @@ async function appendWork(content: Record<string, unknown>, session: Session): P
     return;
   }
   try {
-    await call(token, 'chat.appendStream', { channel: row.channelId, ts: row.streamTs, markdown_text: text });
+    await callOnce(token, 'chat.appendStream', { channel: row.channelId, ts: row.streamTs, markdown_text: text });
     await save(row, { sentText: row.sentText + text });
   } catch (err) {
-    log.warn('slack-progress: stream append failed', { streamId, err: String(err) });
+    log.warn(
+      isRateLimited(err)
+        ? 'slack-progress: stream append rate limited, holding stream'
+        : 'slack-progress: stream append failed',
+      { streamId, err: String(err) },
+    );
     await save(row, { status: 'failed' });
   }
 }
@@ -265,7 +280,7 @@ async function interceptWork(
   const rest = tail.trim() === '' ? '' : tail;
   try {
     if (rest !== '') {
-      await call(token, 'chat.appendStream', { channel: row.channelId, ts: row.streamTs, markdown_text: rest });
+      await callOnce(token, 'chat.appendStream', { channel: row.channelId, ts: row.streamTs, markdown_text: rest });
     }
     await call(token, 'chat.stopStream', { channel: row.channelId, ts: row.streamTs });
     clearTypingStatus(row, token);

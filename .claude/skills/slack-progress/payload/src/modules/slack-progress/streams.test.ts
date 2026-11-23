@@ -202,45 +202,77 @@ describe('rate limits', () => {
     rateLimit.delaysMs = [...saved];
   });
 
-  it('a rate-limited append is retried and the stream does not fail', async () => {
+  it('a rate-limited append is not retried: the stream is held and later appends make no Slack calls', async () => {
     seedStream();
-    let first = true;
     call.mockImplementation(async (_t, method) => {
-      if (method === 'chat.appendStream' && first) {
-        first = false;
-        throw limited(method);
-      }
+      if (method === 'chat.appendStream') throw limited(method);
       return { ok: true };
     });
     await handleStreamAppend(append({ text: ' more' }), session);
-    expect(methods()).toEqual(['chat.appendStream', 'chat.appendStream']);
-    expect(streams.get('st1').status).toBe('open');
-    expect(streams.get('st1').sentText).toBe('Hello more');
+    expect(methods()).toEqual(['chat.appendStream']);
+    expect(streams.get('st1').status).toBe('failed');
+    expect(streams.get('st1').sentText).toBe('Hello');
+    call.mockClear();
+    await handleStreamAppend(append({ text: ' again' }), session);
+    await handleStreamAppend(append({ text: ' and again' }), session);
+    expect(call).not.toHaveBeenCalled();
+    expect(streams.get('st1').sentText).toBe('Hello');
   });
 
-  it('a rate-limited final append and stop are retried, then the reply is handed back as streamed', async () => {
+  it('a held stream: the final row ends it once with a note and declines, so the full text is posted once', async () => {
     seedStream();
-    const seen = new Set<string>();
     call.mockImplementation(async (_t, method) => {
-      if (!seen.has(method)) {
-        seen.add(method);
+      if (method === 'chat.appendStream') throw limited(method);
+      return { ok: true };
+    });
+    await handleStreamAppend(append({ text: ' more' }), session);
+    await handleStreamAppend(append({ text: ' more2' }), session);
+    call.mockClear();
+    const ts = await interceptStreamedReply(msg(), session, { stream: 'st1', text: 'Hello more more2 done' });
+    expect(ts).toBeNull();
+    expect(streamCalls().map((c) => [c[1], (c[2] as any).markdown_text])).toEqual([
+      ['chat.stopStream', '_Reply posted below._'],
+    ]);
+    // a second delivery of the same row does not post to Slack again
+    expect(await interceptStreamedReply(msg(), session, { stream: 'st1', text: 'Hello more more2 done' })).toBeNull();
+  });
+
+  it('a rate-limited final append is not retried: the stream ends with a note and the reply is posted in full', async () => {
+    seedStream();
+    call.mockImplementation(async (_t, method) => {
+      if (method === 'chat.appendStream') throw limited(method);
+      return { ok: true };
+    });
+    const ts = await interceptStreamedReply(msg(), session, { stream: 'st1', text: 'Hello world' });
+    expect(ts).toBeNull();
+    expect(methods()).toEqual(['chat.appendStream', 'chat.stopStream']);
+    expect(streams.get('st1').status).toBe('failed');
+  });
+
+  it('a rate-limited stop is still retried', async () => {
+    seedStream();
+    let first = true;
+    call.mockImplementation(async (_t, method) => {
+      if (method === 'chat.stopStream' && first) {
+        first = false;
         throw limited(method);
       }
       return { ok: true };
     });
     const ts = await interceptStreamedReply(msg(), session, { stream: 'st1', text: 'Hello world' });
     expect(ts).toBe('300.1');
-    expect(methods()).toEqual(['chat.appendStream', 'chat.appendStream', 'chat.stopStream', 'chat.stopStream']);
+    expect(methods()).toEqual(['chat.appendStream', 'chat.stopStream', 'chat.stopStream']);
     expect(streams.get('st1').status).toBe('stopped');
   });
 
-  it('gives up after the bounded retries and the stream is marked failed', async () => {
+  it('a non-rate-limit append error still marks the stream failed', async () => {
     seedStream();
     call.mockImplementation(async (_t, method) => {
-      throw limited(method);
+      if (method === 'chat.appendStream') throw new Error('slack chat.appendStream failed: boom');
+      return { ok: true };
     });
     await handleStreamAppend(append({ text: ' more' }), session);
-    expect(call).toHaveBeenCalledTimes(3);
+    expect(methods()).toEqual(['chat.appendStream']);
     expect(streams.get('st1').status).toBe('failed');
   });
 });
