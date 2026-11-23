@@ -5,7 +5,12 @@
 import fs from 'fs';
 import { findByName } from '../../destinations.js';
 import { writeMessageOut } from '../../db/messages-out.js';
-import { registerChatRowDecorator, registerChatRowHold, registerProgressObserver } from '../../progress-seam.js';
+import {
+  registerChatRowDecorator,
+  registerChatRowHold,
+  registerHoldBarrier,
+  registerProgressObserver,
+} from '../../progress-seam.js';
 import { createHold } from './hold.js';
 import { createStreamer, MARKER_PATH } from './streamer.js';
 import { createProgressTracker } from './tracker.js';
@@ -46,6 +51,8 @@ const streamer = createStreamer({
 const hold = createHold({
   stepsOpen: (platformId) => tracker.stepsOpen(platformId),
   log: (msg) => console.error(`[slack-progress] ${msg}`),
+  // A block that streamed before the task list existed is now held: end its stream at once.
+  onHeld: (row) => streamer.dropFinished(row.platformId, row.body),
 });
 
 registerProgressObserver((e) => {
@@ -55,3 +62,4 @@ registerProgressObserver((e) => {
 });
 registerChatRowHold((row, write) => hold.offer(row, write));
 registerChatRowDecorator((row) => streamer.decorate(row));
+registerHoldBarrier((platformId) => hold.barrier(platformId));

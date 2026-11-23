@@ -3,7 +3,9 @@ import { afterEach, describe, expect, it, spyOn } from 'bun:test';
 import {
   chatRowDecoratorKeys,
   _resetProgressSeamForTesting,
+  holdBarrier,
   holdChatRow,
+  registerHoldBarrier,
   registerChatRowHold,
   decorateChatRow,
   emitProgress,
@@ -116,5 +118,24 @@ describe('chat row hold', () => {
       throw new Error('boom');
     });
     expect(holdChatRow(row, write)).toBe(false);
+  });
+});
+
+describe('hold barrier', () => {
+  it('nothing registered: resolves at once', async () => {
+    await holdBarrier('slack:C1');
+  });
+
+  it('awaits every registered barrier with the chat id, and survives a throwing one', async () => {
+    const seen: string[] = [];
+    registerHoldBarrier(async () => {
+      throw new Error('boom');
+    });
+    registerHoldBarrier(async (id) => {
+      await Promise.resolve();
+      seen.push(id);
+    });
+    await holdBarrier('slack:C1');
+    expect(seen).toEqual(['slack:C1']);
   });
 });

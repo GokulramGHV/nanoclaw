@@ -11,6 +11,7 @@ import { findQuestionResponse, markCompleted } from '../db/messages-in.js';
 import { getDeliveryStatus, writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting, resolveDestinationThread } from '../db/session-routing.js';
 import { getCurrentReplyRoute } from '../db/session-state.js';
+import { holdBarrier } from '../progress-seam.js';
 import { cardProblems } from './card-parts.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
@@ -220,6 +221,9 @@ export const askUserQuestion: McpToolDefinition = {
     const questionId = generateId();
     const r = routing();
 
+    // Held text for this chat goes first, so the question has its context.
+    if (r.platform_id) await holdBarrier(r.platform_id);
+
     // Write question card to outbound.db
     await writeMessageOut({
       id: questionId,
@@ -332,6 +336,7 @@ export const sendCard: McpToolDefinition = {
     const problems = cardProblems(renderable);
     if (problems.length > 0) return err(`Card not sent. Fix these and send it again: ${problems.join('; ')}`);
 
+    if (r.platform_id) await holdBarrier(r.platform_id);
     await writeMessageOut({
       id,
       kind: 'chat-sdk',

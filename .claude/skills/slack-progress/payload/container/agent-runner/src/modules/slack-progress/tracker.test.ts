@@ -35,7 +35,10 @@ function setup(opts: { enabled?: boolean } = {}) {
   return { tracker, rows, advance };
 }
 
-const start = (over: Record<string, unknown> = {}): ProgressEvent => ({
+/** The context row the host writes before an engaged message when it shows a plan for the chat. */
+const DISPLAY_ROW = { id: 's1:wake-context:slack-progress:display:m1' } as MessageInRow;
+
+const start = (over: Record<string, unknown> = {}, messages: MessageInRow[] = [DISPLAY_ROW]): ProgressEvent => ({
   type: 'turn_start',
   routing: {
     platformId: 'C1',
@@ -45,7 +48,7 @@ const start = (over: Record<string, unknown> = {}): ProgressEvent => ({
     taskRun: false,
     ...over,
   },
-  messages: [] as MessageInRow[],
+  messages,
 });
 const todos = (...s: ('pending' | 'in_progress' | 'completed')[]): ProgressEvent => ({
   type: 'todos',
@@ -312,6 +315,22 @@ describe('progress tracker', () => {
     tracker.onEvent(todos('pending'));
     tracker.onEvent({ type: 'turn_end', outcome: 'done' });
     expect(tracker.stepsOpen('C1')).toBe(false);
+  });
+
+  test('stepsOpen is false when the host showed no plan for the turn (a2a room, group off)', () => {
+    const { tracker } = setup();
+    tracker.onEvent(start({}, []));
+    tracker.onEvent(todos('pending', 'in_progress'));
+    expect(tracker.stepsOpen('C1')).toBe(false);
+  });
+
+  test('a follow-up adopted into the turn that carries the display row turns holding on', () => {
+    const { tracker } = setup();
+    tracker.onEvent(start({}, []));
+    tracker.onEvent(todos('in_progress'));
+    expect(tracker.stepsOpen('C1')).toBe(false);
+    tracker.onEvent(start({}, [DISPLAY_ROW]));
+    expect(tracker.stepsOpen('C1')).toBe(true);
   });
 
   test('stepsOpen is false when the feature is off', () => {

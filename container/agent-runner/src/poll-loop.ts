@@ -31,7 +31,7 @@ import {
   type RoutingContext,
 } from './formatter.js';
 import { stripHarnessTagArtifacts } from './harness-tag-strip.js';
-import { chatRowDecoratorKeys, decorateChatRow, emitProgress, holdChatRow } from './progress-seam.js';
+import { chatRowDecoratorKeys, decorateChatRow, emitProgress, holdBarrier, holdChatRow } from './progress-seam.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 import type { ProviderRuntimeContract } from './provider-contracts/registry.js';
@@ -818,6 +818,8 @@ function sendsFailureNotice(routing: RoutingContext): boolean {
 /** Send the dedicated provider error or a generic failure notice. */
 async function deliverErrorResult(routing: RoutingContext, text: string): Promise<void> {
   log('Error result notice — delivering to channel');
+  // Anything a hold kept back for this chat goes first, so the notice keeps its order.
+  if (routing.platformId) await holdBarrier(routing.platformId);
   await writeMessageOut({
     id: generateId(),
     in_reply_to: routing.inReplyTo,
@@ -977,10 +979,10 @@ export async function deliverMidTurnBlocks(
       log(`Mid-turn <message to="${toName}"> repeats a message the nudged turn already sent — skipped`);
       continue;
     }
-    await sendToDestination(dest, body, routing);
+    const held = await sendToDestination(dest, body, routing);
     delivered++;
     if (answersBatch(dest, routing)) replied++;
-    log(`Mid-turn delivery: <message to="${toName}"> (${body.length} chars)`);
+    log(`Mid-turn ${held ? 'held' : 'delivery'}: <message to="${toName}"> (${body.length} chars)`);
   }
   return { delivered, replied, tail };
 }
@@ -1366,7 +1368,8 @@ export async function autoAppendTaskLog(text: string): Promise<void> {
   log('Task run log auto-appended from final text');
 }
 
-async function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): Promise<void> {
+/** Returns true when a registered hold took the row instead of writing it. */
+async function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): Promise<boolean> {
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
   // Thread per destination: the batch's own thread when the destination is the
@@ -1390,8 +1393,9 @@ async function sendToDestination(dest: DestinationEntry, body: string, routing: 
     });
   };
   // A registered hold may take the row and write it later, or drop it.
-  if (holdChatRow(info, write)) return;
+  if (holdChatRow(info, write)) return true;
   await write();
+  return false;
 }
 
 /** Publish `routing` as the reply stamp the MCP tools read (null route clears it). */

@@ -8,6 +8,9 @@
  *   written for a complete <message> block. It can never replace `text`.
  * - A chat row hold may take a row before it is written and write it later,
  *   or drop it.
+ * - A hold barrier runs before a write that bypasses the chat row path (a
+ *   blocking question, a card, a direct send, an error notice), so anything a
+ *   hold kept back for that chat is written first and the order is kept.
  *
  * With nothing registered, all are no-ops and nothing changes.
  *
@@ -40,11 +43,14 @@ type ProgressObserver = (e: ProgressEvent) => void;
 type ChatRowDecorator = (row: ChatRowInfo) => Record<string, unknown> | null;
 /** Return true to take the row: the hold then owns `write` and may call it later, or never. */
 type ChatRowHold = (row: ChatRowInfo, write: () => Promise<void>) => boolean;
+/** Write whatever the hold keeps back for this chat. Resolves once those writes settle. */
+type HoldBarrier = (platformId: string) => Promise<void>;
 
 const observers: ProgressObserver[] = [];
 const decorators: ChatRowDecorator[] = [];
 const decoratorKeys = new Set<string>();
 const holds: ChatRowHold[] = [];
+const barriers: HoldBarrier[] = [];
 
 function log(msg: string): void {
   console.error(`[progress-seam] ${msg}`);
@@ -110,6 +116,21 @@ export function holdChatRow(row: ChatRowInfo, write: () => Promise<void>): boole
   return false;
 }
 
+export function registerHoldBarrier(fn: HoldBarrier): void {
+  barriers.push(fn);
+}
+
+/** Call before writing to `platformId` without `holdChatRow`. Never throws; a no-op with nothing registered. */
+export async function holdBarrier(platformId: string): Promise<void> {
+  for (const fn of barriers) {
+    try {
+      await fn(platformId);
+    } catch (err) {
+      log(`hold barrier failed: ${errText(err)}`);
+    }
+  }
+}
+
 /**
  * Keys any decorator has ever added to a row (never `text`). Empty until a
  * decorator returns fields, so callers can leave their behavior unchanged
@@ -124,4 +145,5 @@ export function _resetProgressSeamForTesting(): void {
   decorators.length = 0;
   decoratorKeys.clear();
   holds.length = 0;
+  barriers.length = 0;
 }

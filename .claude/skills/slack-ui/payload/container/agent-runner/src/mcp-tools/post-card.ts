@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting, resolveDestinationThread } from '../db/session-routing.js';
 import { getCurrentInReplyTo, getCurrentReplyRoute } from '../db/session-state.js';
+import { holdBarrier } from '../progress-seam.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -69,6 +70,9 @@ export const postCard: McpToolDefinition = {
     if (typeof data !== 'object' || data === null || Array.isArray(data)) return err('data must be an object');
 
     const cardId = randomUUID();
+    // Held text for this chat goes first, so the card has its context and the order is kept.
+    const platformId = routing().platform_id;
+    if (platformId) await holdBarrier(platformId);
     await writeMessageOut({
       id: generateId(),
       kind: 'system',

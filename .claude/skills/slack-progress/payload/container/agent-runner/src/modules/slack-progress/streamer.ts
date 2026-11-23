@@ -102,6 +102,8 @@ function soleHumanSender(messages: MessageInRow[]): string | null {
 export function createStreamer(deps: StreamerDeps): {
   onEvent(e: ProgressEvent): void;
   decorate(row: ChatRowInfo): Record<string, unknown> | null;
+  /** The hold took this block's row: end its stream now, so held text is not left streaming. */
+  dropFinished(platformId: string, body: string): void;
 } {
   let active = false;
   let turn: Turn | null = null;
@@ -237,5 +239,15 @@ export function createStreamer(deps: StreamerDeps): {
     return { stream: match.id };
   }
 
-  return { onEvent, decorate };
+  function dropFinished(platformId: string, body: string): void {
+    const q = finished.get(platformId);
+    if (!q) return;
+    const text = norm(body);
+    const at = q.findIndex((f) => f.text === text);
+    if (at === -1) return;
+    const [gone] = q.splice(at, 1);
+    abort(platformId, gone!.id);
+  }
+
+  return { onEvent, decorate, dropFinished };
 }

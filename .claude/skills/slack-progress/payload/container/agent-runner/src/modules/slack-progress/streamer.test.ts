@@ -201,6 +201,21 @@ describe('streamer', () => {
     expect(s.streamer.decorate(rowFor('one'))).toBeNull();
   });
 
+  test('dropFinished aborts the stream of the matching finished block and stops decorating it', () => {
+    const s = setup();
+    s.streamer.onEvent(start());
+    s.text('<message to="room">plan</message><message to="room">other</message>');
+    s.advance(500);
+    s.streamer.dropFinished(CHAT, ' plan ');
+    expect(s.rows.filter((r) => r.action === 'stream_abort')).toEqual([
+      { action: 'stream_abort', streamId: 's-1', platformId: CHAT },
+    ]);
+    expect(s.streamer.decorate(rowFor('plan'))).toBeNull();
+    expect(s.streamer.decorate(rowFor('other'))).toEqual({ stream: 's-2' });
+    s.streamer.dropFinished(CHAT, 'unknown');
+    expect(s.rows.filter((r) => r.action === 'stream_abort')).toHaveLength(1);
+  });
+
   test('decorate returns null for a block that never streamed', () => {
     const s = setup();
     s.streamer.onEvent(start());

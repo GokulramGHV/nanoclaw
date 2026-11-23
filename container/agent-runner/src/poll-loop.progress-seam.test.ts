@@ -6,6 +6,8 @@ import { processQuery, runPollLoop } from './poll-loop.js';
 import {
   _resetProgressSeamForTesting,
   registerChatRowDecorator,
+  registerChatRowHold,
+  registerHoldBarrier,
   registerProgressObserver,
   type ProgressEvent,
 } from './progress-seam.js';
@@ -222,5 +224,43 @@ describe('poll-loop progress seam', () => {
     }
     await processQuery(stubQuery(finished()), ROUTING, ['request-a'], 'claude', undefined, 'prompt', undefined, true);
     expect(seen).toEqual([{ type: 'turn_end', outcome: 'done' }]);
+  });
+});
+
+describe('poll-loop chat row hold', () => {
+  it('a held row is not written; its write later carries the same routing, in_reply_to and decorator fields', async () => {
+    registerChatRowDecorator(() => ({ stream: 'stream-1' }));
+    const held: Array<() => Promise<void>> = [];
+    registerChatRowHold((_row, write) => {
+      held.push(write);
+      return true;
+    });
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'text', text: '<message to="main">Held text</message>' };
+      yield { type: 'result', text: '' };
+    }
+    await processQuery(stubQuery(events()), ROUTING, ['request-a'], 'claude', undefined, 'prompt', undefined, true);
+    expect(getUndeliveredMessages().filter((r) => r.kind === 'chat')).toHaveLength(0);
+    expect(held).toHaveLength(1);
+    await held[0]!();
+    const rows = getUndeliveredMessages().filter((r) => r.kind === 'chat');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].platform_id).toBe('channel-1');
+    expect(rows[0].channel_type).toBe('slack');
+    expect(rows[0].thread_id).toBe('thread-a');
+    expect(rows[0].in_reply_to).toBe('request-a');
+    expect(JSON.parse(rows[0].content)).toEqual({ stream: 'stream-1', text: 'Held text' });
+  });
+
+  it('the failure notice waits for the hold barrier of its chat', async () => {
+    const order: string[] = [];
+    registerHoldBarrier(async (platformId) => {
+      order.push(`barrier:${platformId}`);
+    });
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'result', text: 'boom', isError: true } as ProviderEvent;
+    }
+    await processQuery(stubQuery(events()), ROUTING, ['request-a'], 'claude', undefined, 'prompt', undefined, true);
+    expect(order).toEqual(['barrier:channel-1']);
   });
 });

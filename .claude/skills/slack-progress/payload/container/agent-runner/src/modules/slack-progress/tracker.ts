@@ -35,7 +35,17 @@ export interface TrackerDeps {
 const FIRST_ROW_MS = 5000;
 
 /** Task list and discovery tools. They never change the "doing" line or count as work. */
-const QUIET_TOOLS = new Set(['TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet', 'ToolSearch']);
+export const QUIET_TOOLS = new Set(['TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet', 'ToolSearch']);
+
+/**
+ * The host writes this context row before an engaged message only when it shows a plan
+ * for that chat. Without it (a2a rooms, groups with progress off) nothing is held.
+ */
+const DISPLAY_ROW_MARK = ':wake-context:slack-progress:';
+
+function showsDisplay(messages: { id?: string }[] | undefined): boolean {
+  return (messages ?? []).some((m) => typeof m.id === 'string' && m.id.includes(DISPLAY_ROW_MARK));
+}
 
 type Status = ProgressRow['todos'][number]['status'];
 type TaskStep = { title: string; status: Status };
@@ -46,6 +56,8 @@ interface OpenTurn {
   platformId: string;
   threadId: string | null;
   startedAt: number;
+  /** The host told the agent its progress is shown here, so mid-task messages may be held. */
+  display: boolean;
   todos: ProgressRow['todos'];
   /** Ids of task-list steps created or updated in this turn, in first-seen order. */
   shown: Set<string>;
@@ -60,7 +72,10 @@ interface OpenTurn {
 
 export function createProgressTracker(deps: TrackerDeps): {
   onEvent(e: ProgressEvent): void;
-  /** True while this turn answers `platformId` and its task list still has unfinished steps. */
+  /**
+   * True while this turn answers `platformId`, the host shows its plan there, and its
+   * task list still has unfinished steps.
+   */
   stepsOpen(platformId: string): boolean;
 } {
   let turn: OpenTurn | null = null;
@@ -166,7 +181,11 @@ export function createProgressTracker(deps: TrackerDeps): {
   function onEvent(e: ProgressEvent): void {
     switch (e.type) {
       case 'turn_start': {
-        if (turn) return;
+        if (turn) {
+          // A follow-up adopted into the live turn can carry the display row.
+          if (showsDisplay(e.messages)) turn.display = true;
+          return;
+        }
         const r = e.routing;
         if (r.taskRun || r.channelType !== 'slack' || !r.platformId) return;
         const t: OpenTurn = {
@@ -174,6 +193,7 @@ export function createProgressTracker(deps: TrackerDeps): {
           platformId: r.platformId,
           threadId: r.threadId,
           startedAt: deps.now(),
+          display: showsDisplay(e.messages),
           todos: [],
           shown: new Set(),
           doing: null,
@@ -233,7 +253,7 @@ export function createProgressTracker(deps: TrackerDeps): {
 
   function stepsOpen(platformId: string): boolean {
     const t = turn;
-    if (!t || !deps.enabled() || t.platformId !== platformId) return false;
+    if (!t || !t.display || !deps.enabled() || t.platformId !== platformId) return false;
     return t.todos.some((x) => x.status !== 'completed');
   }
 
