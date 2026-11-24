@@ -20,6 +20,7 @@ import { envValue } from '../../env.js';
 import { unguarded } from '../../guard/types.js';
 import { resolveGroupFolderPath } from '../../group-folder.js';
 import { log } from '../../log.js';
+import { pauseTypingRefreshAfterDelivery } from '../typing/index.js';
 import { sessionDir } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 import { getCardById } from './db/kit-cards.js';
@@ -244,6 +245,8 @@ async function postCard(content: Record<string, unknown>, session: Session): Pro
       instance,
     },
   });
+  // A card is a visible reply: stop the typing refresher from setting "Typing..." again, as delivery does after a chat message.
+  pauseTypingRefreshAfterDelivery(session.id);
   if (replaced) await closeReplaced(replaced, client);
 }
 

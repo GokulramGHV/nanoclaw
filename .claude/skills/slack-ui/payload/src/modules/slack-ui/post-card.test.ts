@@ -17,6 +17,7 @@ vi.mock('../../group-folder.js', () => ({ resolveGroupFolderPath: vi.fn() }));
 vi.mock('../../session-manager.js', () => ({ sessionDir: vi.fn(), writeSessionMessage: vi.fn() }));
 vi.mock('../../request-wake.js', () => ({ requestWake: vi.fn() }));
 vi.mock('../../db/sessions.js', () => ({ getSession: vi.fn() }));
+vi.mock('../typing/index.js', () => ({ pauseTypingRefreshAfterDelivery: vi.fn() }));
 vi.mock('../../log.js', () => ({ log: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), debug: vi.fn() } }));
 
 const fake = vi.hoisted(() => ({
@@ -68,6 +69,7 @@ import { kit } from './kit.js';
 import { log } from '../../log.js';
 import { slackClientForToken } from './slack-client.js';
 import { handlePostCard, readInboundSender } from './post-card.js';
+import { pauseTypingRefreshAfterDelivery } from '../typing/index.js';
 
 const notify = vi.mocked(notifyCardFailure);
 
@@ -297,6 +299,17 @@ describe('post_card replaces', () => {
 });
 
 describe('post_card', () => {
+  it('pauses the typing refresher after the card posts, and not when the post fails', async () => {
+    const pause = vi.mocked(pauseTypingRefreshAfterDelivery);
+    pause.mockClear();
+    await post();
+    expect(pause).toHaveBeenCalledWith('sess-1');
+    pause.mockClear();
+    fake.postError = new Error('boom');
+    await post();
+    expect(pause).not.toHaveBeenCalled();
+  });
+
   it('posts the OpenUI card to the session channel and saves it with host metadata', async () => {
     await post();
     expect(posts()).toHaveLength(1);

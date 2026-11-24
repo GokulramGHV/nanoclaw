@@ -18,6 +18,7 @@ import { getSession } from '../../db/sessions.js';
 import { envValue } from '../../env.js';
 import { unguarded } from '../../guard/types.js';
 import { log } from '../../log.js';
+import { pauseTypingRefreshAfterDelivery } from '../typing/index.js';
 import { requestWake } from '../../request-wake.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
@@ -288,6 +289,8 @@ async function ask(content: Obj, session: Session): Promise<void> {
       questions: spec.questions.map((q) => ({ question: q.question, options: q.options.map((o) => o.label) })),
     },
   });
+  // A card is a visible reply: stop the typing refresher from setting "Typing..." again, as delivery does after a chat message.
+  pauseTypingRefreshAfterDelivery(session.id);
   await closeAsks(client, older);
 }
 
