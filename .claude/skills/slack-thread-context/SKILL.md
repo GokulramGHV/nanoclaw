@@ -92,4 +92,4 @@ Optional `.env` values (read on each message): `SLACK_THREAD_CONTEXT_MAX_MESSAGE
 - The agent sees "could not be read (slack conversations.replies failed: missing_scope)": add the history scopes above and reinstall the app.
 - `not_in_channel`: invite the bot to the channel.
 - No thread context at all: the group is off (`status`), the message is not inside a thread, or the host was not restarted after install.
-- The block shows up one message late: the wake-context budget was missed; see Limits above.
+- The thread block is only a stub: the Slack reads missed the 1.2 s deadline; read the thread.md it names.
