@@ -60,6 +60,7 @@ import { resolveGroupFolderPath } from '../../group-folder.js';
 import { INBOUND_SCHEMA } from '../../mailbox/sqlite/schema.js';
 import { sessionDir } from '../../session-manager.js';
 import type { Session } from '../../types.js';
+import { getDb } from '../../db/connection.js';
 import { getCardById } from './db/kit-cards.js';
 import './index.js';
 import { notifyCardFailure } from './notify.js';
@@ -241,7 +242,48 @@ describe('post_card replaces', () => {
     fake.calls.length = 0;
     await post({ cardId: 'new-1', replaces: 'old-1' });
     expect(methods()).toEqual(['chat.postMessage']);
-    expect(await getCardById('new-1')).toBeDefined();
+    expect((await getCardById('new-1'))?.owner).toBe('');
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining('already closed'), { cardId: 'old-1' });
+  });
+
+  it('ignores a card of another template and uses the normal owner', async () => {
+    await postOld();
+    writeTemplate('other-request', templateJson);
+    await post({ cardId: 'new-1', template: 'other-request', replaces: 'old-1' });
+    expect(methods()).toEqual(['chat.postMessage']);
+    expect((await getCardById('new-1'))?.owner).toBe('');
+    expect((await getCardById('old-1'))?.locked).toBeFalsy();
+  });
+
+  it('closes the old card on redelivery of an already posted card', async () => {
+    await postOld();
+    await post({ cardId: 'new-1', replaces: 'old-1' });
+    // Reopen the old card as if the first attempt crashed before the close.
+    const old = (await getCardById('old-1'))!;
+    await getDb().run(
+      'UPDATE ui_kit_cards SET record_json = ? WHERE card_id = ?',
+      JSON.stringify({ ...old, locked: undefined }),
+      'old-1',
+    );
+    fake.calls.length = 0;
+    await post({ cardId: 'new-1', replaces: 'old-1' });
+    expect(methods()).toEqual(['chat.update']);
+    expect((await getCardById('old-1'))?.locked).toBeTruthy();
+  });
+
+  it('closes the old card with its own instance token', async () => {
+    await postOld();
+    const old = (await getCardById('old-1'))!;
+    await getDb().run(
+      'UPDATE ui_kit_cards SET record_json = ? WHERE card_id = ?',
+      JSON.stringify({ ...old, meta: { ...old.meta, instance: 'other' } }),
+      'old-1',
+    );
+    fake.tokens.length = 0;
+    vi.mocked(envValue).mockImplementation(((k: string) =>
+      k === 'SLACK_BOT_TOKEN_X' ? 'xoxb-other' : 'xoxb-secret') as never);
+    await post({ cardId: 'new-1', replaces: 'old-1' });
+    expect(fake.tokens).toEqual(['xoxb-secret', 'xoxb-other']);
   });
 
   it('still posts the new card when closing the old one fails', async () => {

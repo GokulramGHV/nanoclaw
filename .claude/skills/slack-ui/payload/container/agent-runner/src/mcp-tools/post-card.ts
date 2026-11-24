@@ -45,7 +45,7 @@ export const postCard: McpToolDefinition = {
   tool: {
     name: 'post_card',
     description:
-      "Post a predefined interactive card from this agent group's card templates. Pass the template name and its data only; the layout and who can press each control come from the template. To post an updated version of a card you posted earlier, pass that card's id in `replaces`: the old card closes once the new one is posted.",
+      "Post a predefined interactive card from this agent group's card templates. Pass the template name and its data only; the layout and who can press each control come from the template. To post an updated version of a card you posted earlier, pass the id of the most recent version in `replaces`: the old card closes once the new one is posted.",
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -58,7 +58,7 @@ export const postCard: McpToolDefinition = {
         replaces: {
           type: 'string',
           description:
-            'Optional. The card id of an earlier card from this session (the id returned when you posted it, or the cardId in its card_event). The new card keeps its owner and the old card is closed after the new one posts.',
+            'Optional. The card id of the most recent version of this card from this session (the id returned when you posted it, or the cardId in its card_event). The new card keeps its owner and the old card is closed after the new one posts.',
         },
       },
       required: ['template'],

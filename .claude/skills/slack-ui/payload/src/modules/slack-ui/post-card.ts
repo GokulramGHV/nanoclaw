@@ -10,7 +10,7 @@ import path from 'node:path';
 
 import Database from 'better-sqlite3';
 
-import { CardRenderError } from 'slack-ui-kit';
+import { CardRenderError, type CardRecord } from 'slack-ui-kit';
 
 import { botTokenKeyForInstance } from '../../channels/slack-lib.js';
 import { registerDeliveryAction } from '../../delivery.js';
@@ -214,10 +214,13 @@ async function postCard(content: Record<string, unknown>, session: Session): Pro
   const existing = await getCardById(cardId);
   if (existing) {
     if (existing.meta?.sessionId !== session.id) throw new PostCardError('card id already in use');
-    return; // redelivery of a card that was already posted
+    // Redelivery of a card that was already posted; finish a close the first attempt may have missed.
+    const pending = await findReplaced(content.replaces, session, templateName);
+    if (pending) await closeReplaced(pending, slackClientForToken(token));
+    return;
   }
 
-  const replaced = await findReplaced(content.replaces, session);
+  const replaced = await findReplaced(content.replaces, session, templateName);
   const owner = replaced ? replaced.owner : (readInboundSender(session, content.inReplyTo) ?? '');
   const state = escapeEntities(data);
   try {
@@ -241,24 +244,37 @@ async function postCard(content: Record<string, unknown>, session: Session): Pro
       instance,
     },
   });
-  if (replaced && !replaced.locked) {
-    try {
-      await kit.closeCard(client, replaced.channel, replaced.ts, { note: 'Replaced by a newer version.' });
-    } catch (err) {
-      log.warn('slack-ui: could not close the replaced card', { ts: replaced.ts, err: String(err) });
-    }
+  if (replaced) await closeReplaced(replaced, client);
+}
+
+/** Close the replaced card with its own instance's client (fallback: `fallback`). A failure is logged only. */
+async function closeReplaced(old: CardRecord, fallback: ReturnType<typeof slackClientForToken>): Promise<void> {
+  try {
+    const instance = old.meta?.instance;
+    const oldToken = typeof instance === 'string' && instance !== '' ? envValue(botTokenKeyForInstance(instance)) : '';
+    const client = oldToken ? slackClientForToken(oldToken) : fallback;
+    await kit.closeCard(client, old.channel, old.ts, { note: 'Replaced by a newer version.' });
+  } catch (err) {
+    log.warn('slack-ui: could not close the replaced card', { ts: old.ts, err: String(err) });
   }
 }
 
 /**
- * The earlier card a new post replaces: it must exist, belong to this session and be a plain card.
- * Anything else is ignored with a warning and the new card posts normally. Never throws.
+ * The earlier card a new post replaces: it must exist, belong to this session, be a plain card of the
+ * same template and still be open. Anything else is ignored with a warning and the new card posts
+ * normally (with the normal owner). Never throws.
  */
-async function findReplaced(replaces: unknown, session: Session) {
+async function findReplaced(replaces: unknown, session: Session, templateName: string) {
   if (replaces === undefined || replaces === null || replaces === '') return undefined;
   try {
     const old = typeof replaces === 'string' ? await getCardById(replaces) : undefined;
-    if (old && old.meta?.sessionId === session.id && old.meta?.kind === 'card') return old;
+    if (old && old.meta?.sessionId === session.id && old.meta?.kind === 'card' && old.meta?.template === templateName) {
+      if (!old.locked) return old;
+      log.warn('slack-ui: ignoring replaces, that card is already closed; pass the most recent version', {
+        cardId: replaces,
+      });
+      return undefined;
+    }
   } catch (err) {
     log.warn('slack-ui: could not look up the card to replace', { err: String(err) });
     return undefined;
