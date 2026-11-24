@@ -29,6 +29,16 @@ describe('describeTool', () => {
     expect(describeTool('Task', {})).toBe('Working with a helper agent');
     expect(describeTool('Skill', {})).toBe('Using a skill');
   });
+  test('Skill names the skill when it is a plain name', () => {
+    expect(describeTool('Skill', { skill: 'team-tickets' })).toBe('Using skill team-tickets');
+    expect(describeTool('Skill', { skill: 'plugin:pdf', args: 'secret stuff' })).toBe('Using skill plugin:pdf');
+  });
+  test('Skill hides anything that is not a plain name', () => {
+    expect(describeTool('Skill', { skill: 'a b' })).toBe('Using a skill');
+    expect(describeTool('Skill', { skill: '<!channel>' })).toBe('Using a skill');
+    expect(describeTool('Skill', { skill: 'x'.repeat(65) })).toBe('Using a skill');
+    expect(describeTool('Skill', { skill: 42 })).toBe('Using a skill');
+  });
   test('mcp and unknown tools', () => {
     expect(describeTool('mcp__github__get_repo', {})).toBe('Using github');
     expect(describeTool('Unknown', {})).toBe('Working');

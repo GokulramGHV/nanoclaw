@@ -1,7 +1,8 @@
 /**
  * Plain, safe descriptions of tool calls for the progress plan.
  * Tool input is never included, except Bash's own description,
- * cut to one line of at most 80 characters.
+ * cut to one line of at most 80 characters, and the Skill tool's skill name
+ * when it is a plain name.
  */
 const FIXED: Record<string, string> = {
   Read: 'Reading files',
@@ -35,7 +36,14 @@ const BUILT_IN: Record<string, string> = {
   add_mcp_server: 'Adding a tool',
 };
 
+/** A skill name as the Skill tool takes it ("pdf", "plugin:skill-name"). Anything else is not shown. */
+const SKILL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
+
 export function describeTool(name: string, input: Record<string, unknown>): string {
+  if (name === 'Skill') {
+    const skill = typeof input.skill === 'string' ? input.skill.trim() : '';
+    return SKILL_NAME.test(skill) ? `Using skill ${skill}` : FIXED.Skill!;
+  }
   if (name === 'Bash') {
     const d = typeof input.description === 'string' ? (input.description.split('\n')[0] ?? '').trim() : '';
     return d ? d.slice(0, 80) : 'Running a command';
