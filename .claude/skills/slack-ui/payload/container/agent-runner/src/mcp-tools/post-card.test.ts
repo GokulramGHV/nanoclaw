@@ -48,4 +48,21 @@ describe('post_card', () => {
     }
     expect(getUndeliveredMessages()).toHaveLength(0);
   });
+
+  it('passes replaces through and accepts it as an optional string in the schema', async () => {
+    const props = postCard.tool.inputSchema.properties as Record<string, { type: string }>;
+    expect(props.replaces.type).toBe('string');
+    expect(postCard.tool.inputSchema.required).toEqual(['template']);
+
+    await postCard.handler({ template: 'demo-request', replaces: ' earlier-card ' });
+    expect(JSON.parse(getUndeliveredMessages()[0].content).replaces).toBe('earlier-card');
+  });
+
+  it('omits replaces when absent and rejects a non-string', async () => {
+    await postCard.handler({ template: 'demo-request' });
+    expect('replaces' in JSON.parse(getUndeliveredMessages()[0].content)).toBe(false);
+    const result = await postCard.handler({ template: 'demo-request', replaces: 5 });
+    expect(result.isError).toBe(true);
+    expect(getUndeliveredMessages()).toHaveLength(1);
+  });
 });

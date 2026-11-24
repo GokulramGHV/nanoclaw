@@ -217,14 +217,16 @@ async function postCard(content: Record<string, unknown>, session: Session): Pro
     return; // redelivery of a card that was already posted
   }
 
-  const owner = readInboundSender(session, content.inReplyTo) ?? '';
+  const replaced = await findReplaced(content.replaces, session);
+  const owner = replaced ? replaced.owner : (readInboundSender(session, content.inReplyTo) ?? '');
   const state = escapeEntities(data);
   try {
     await kit.render(template.source, state);
   } catch (err) {
     throw new PostCardError(`template ${templateName} could not be rendered: ${shortMessage(err)}`);
   }
-  await kit.postCard(slackClientForToken(token), { channel, ...(threadTs ? { threadTs } : {}) }, template.source, {
+  const client = slackClientForToken(token);
+  await kit.postCard(client, { channel, ...(threadTs ? { threadTs } : {}) }, template.source, {
     owner,
     access: template.access,
     trusted: true,
@@ -239,6 +241,30 @@ async function postCard(content: Record<string, unknown>, session: Session): Pro
       instance,
     },
   });
+  if (replaced && !replaced.locked) {
+    try {
+      await kit.closeCard(client, replaced.channel, replaced.ts, { note: 'Replaced by a newer version.' });
+    } catch (err) {
+      log.warn('slack-ui: could not close the replaced card', { ts: replaced.ts, err: String(err) });
+    }
+  }
+}
+
+/**
+ * The earlier card a new post replaces: it must exist, belong to this session and be a plain card.
+ * Anything else is ignored with a warning and the new card posts normally. Never throws.
+ */
+async function findReplaced(replaces: unknown, session: Session) {
+  if (replaces === undefined || replaces === null || replaces === '') return undefined;
+  try {
+    const old = typeof replaces === 'string' ? await getCardById(replaces) : undefined;
+    if (old && old.meta?.sessionId === session.id && old.meta?.kind === 'card') return old;
+  } catch (err) {
+    log.warn('slack-ui: could not look up the card to replace', { err: String(err) });
+    return undefined;
+  }
+  log.warn('slack-ui: ignoring replaces, no such card in this session');
+  return undefined;
 }
 
 export async function handlePostCard(content: Record<string, unknown>, session: Session): Promise<void> {

@@ -16,6 +16,7 @@ This skill adds two tools for agents, `post_card` and `ask`, and the host code b
 - The template decides who may press each control: the owner, anyone, a list of users, or members of one Slack user group. A control with no rule is owner-only. The agent cannot change the rules.
 - A button press locks the card when an allowed person presses it. The card is redrawn without its controls and shows who submitted it and when.
 - Presses come back to the agent as `card_event` messages.
+- `post_card({ template, data, replaces })` posts an updated version of an earlier card of the same session. The new card keeps the old card's owner; once it has posted, the old card is closed with the note "Replaced by a newer version.". A `replaces` id that is unknown, from another session or an ask is ignored and the card posts normally; an already locked old card is left alone. A failure to close the old card is logged and never fails the post.
 
 **`ask`**
 

@@ -22,7 +22,9 @@ vi.mock('../../log.js', () => ({ log: { warn: vi.fn(), info: vi.fn(), error: vi.
 const fake = vi.hoisted(() => ({
   calls: [] as Array<{ method: string; args: any }>,
   postError: undefined as unknown,
+  updateError: undefined as unknown,
   tokens: [] as string[],
+  posted: 0,
 }));
 vi.mock('./slack-client.js', () => ({
   slackClientForToken: (token: string) => {
@@ -32,9 +34,14 @@ vi.mock('./slack-client.js', () => ({
         postMessage: async (args: unknown) => {
           fake.calls.push({ method: 'chat.postMessage', args });
           if (fake.postError) throw fake.postError;
-          return { ok: true, ts: '1700000000.000200' };
+          fake.posted += 1;
+          return { ok: true, ts: fake.posted === 1 ? '1700000000.000200' : `1700000000.00${200 + fake.posted}` };
         },
-        update: async (args: unknown) => (fake.calls.push({ method: 'chat.update', args }), { ok: true }),
+        update: async (args: unknown) => {
+          fake.calls.push({ method: 'chat.update', args });
+          if (fake.updateError) throw fake.updateError;
+          return { ok: true };
+        },
         delete: async (args: unknown) => (fake.calls.push({ method: 'chat.delete', args }), { ok: true }),
         postEphemeral: async (args: unknown) => (fake.calls.push({ method: 'chat.postEphemeral', args }), { ok: true }),
       },
@@ -57,6 +64,8 @@ import { getCardById } from './db/kit-cards.js';
 import './index.js';
 import { notifyCardFailure } from './notify.js';
 import { kit } from './kit.js';
+import { log } from '../../log.js';
+import { slackClientForToken } from './slack-client.js';
 import { handlePostCard, readInboundSender } from './post-card.js';
 
 const notify = vi.mocked(notifyCardFailure);
@@ -151,7 +160,9 @@ beforeEach(async () => {
   vi.clearAllMocks();
   fake.calls.length = 0;
   fake.tokens.length = 0;
+  fake.posted = 0;
   fake.postError = undefined;
+  fake.updateError = undefined;
   groupDir = mkdir();
   sessDir = mkdir();
   writeTemplate('demo-request', templateJson);
@@ -174,6 +185,72 @@ afterEach(async () => {
 describe('registration', () => {
   it('registers post_card as a delivery action', () => {
     expect(getDeliveryAction('post_card')).toBe(handlePostCard);
+  });
+});
+
+describe('post_card replaces', () => {
+  const methods = () => fake.calls.map((c) => c.method);
+
+  async function postOld(owner = 'U_OLD') {
+    seedInbound([chatRow('m1', owner)]);
+    await post({ cardId: 'old-1', inReplyTo: 'm1' });
+    fake.calls.length = 0;
+    vi.mocked(log.warn).mockClear();
+  }
+
+  it('closes an open card of the same session after posting, keeping its owner', async () => {
+    await postOld();
+    await post({ cardId: 'new-1', replaces: 'old-1', inReplyTo: 'nobody' });
+    expect(methods()).toEqual(['chat.postMessage', 'chat.update']);
+    expect((await getCardById('new-1'))?.owner).toBe('U_OLD');
+    const old = await getCardById('old-1');
+    expect(old?.locked).toBeTruthy();
+    expect(JSON.stringify(fake.calls[1]!.args)).toContain('Replaced by a newer version.');
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('leaves the old card open when the new post fails', async () => {
+    await postOld();
+    fake.postError = new Error('boom');
+    await post({ cardId: 'new-1', replaces: 'old-1' });
+    expect(methods()).toEqual(['chat.postMessage']);
+    expect((await getCardById('old-1'))?.locked).toBeFalsy();
+    expect(await getCardById('new-1')).toBeUndefined();
+  });
+
+  it('ignores a card from another session', async () => {
+    await postOld();
+    await post({ cardId: 'new-1', replaces: 'old-1', inReplyTo: 'nobody' }, { ...session, id: 'sess-2' });
+    expect(methods()).toEqual(['chat.postMessage']);
+    expect((await getCardById('old-1'))?.locked).toBeFalsy();
+    expect((await getCardById('new-1'))?.owner).toBe('');
+    expect(log.warn).toHaveBeenCalled();
+  });
+
+  it('ignores an unknown id', async () => {
+    await postOld();
+    await post({ cardId: 'new-1', replaces: 'nope' });
+    expect(methods()).toEqual(['chat.postMessage']);
+    expect(await getCardById('new-1')).toBeDefined();
+    expect(log.warn).toHaveBeenCalled();
+  });
+
+  it('leaves a locked old card alone', async () => {
+    await postOld();
+    await kit.closeCard(slackClientForToken('t'), 'C123', '1700000000.000200', { note: 'x' });
+    fake.calls.length = 0;
+    await post({ cardId: 'new-1', replaces: 'old-1' });
+    expect(methods()).toEqual(['chat.postMessage']);
+    expect(await getCardById('new-1')).toBeDefined();
+  });
+
+  it('still posts the new card when closing the old one fails', async () => {
+    await postOld();
+    fake.updateError = new Error('slack down');
+    await post({ cardId: 'new-1', replaces: 'old-1' });
+    expect(await getCardById('new-1')).toBeDefined();
+    expect(log.warn).toHaveBeenCalledWith('slack-ui: could not close the replaced card', expect.anything());
+    expect(notify).not.toHaveBeenCalled();
   });
 });
 

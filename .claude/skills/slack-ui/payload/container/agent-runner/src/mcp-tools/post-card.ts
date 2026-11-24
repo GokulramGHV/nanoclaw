@@ -45,7 +45,7 @@ export const postCard: McpToolDefinition = {
   tool: {
     name: 'post_card',
     description:
-      "Post a predefined interactive card from this agent group's card templates. Pass the template name and its data only; the layout and who can press each control come from the template.",
+      "Post a predefined interactive card from this agent group's card templates. Pass the template name and its data only; the layout and who can press each control come from the template. To post an updated version of a card you posted earlier, pass that card's id in `replaces`: the old card closes once the new one is posted.",
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -54,6 +54,11 @@ export const postCard: McpToolDefinition = {
           type: 'object',
           description:
             "The template's data fields, exactly as its `data` section declares them (read /workspace/agent/plugins/<plugin>/cards/<template>.json). Defaults to {}.",
+        },
+        replaces: {
+          type: 'string',
+          description:
+            'Optional. The card id of an earlier card from this session (the id returned when you posted it, or the cardId in its card_event). The new card keeps its owner and the old card is closed after the new one posts.',
         },
       },
       required: ['template'],
@@ -68,6 +73,11 @@ export const postCard: McpToolDefinition = {
     const data = args.data === undefined ? {} : args.data;
     if (typeof data !== 'object' || data === null || Array.isArray(data)) return err('data must be an object');
 
+    const rawReplaces = args.replaces;
+    if (rawReplaces !== undefined && rawReplaces !== null && typeof rawReplaces !== 'string')
+      return err('replaces must be a string');
+    const replaces = typeof rawReplaces === 'string' && rawReplaces.trim() ? rawReplaces.trim() : undefined;
+
     const cardId = randomUUID();
     await writeMessageOut({
       id: generateId(),
@@ -77,6 +87,7 @@ export const postCard: McpToolDefinition = {
         cardId,
         template,
         data,
+        ...(replaces ? { replaces } : {}),
         threadId: routing().thread_id,
         inReplyTo: getCurrentInReplyTo(),
       }),
