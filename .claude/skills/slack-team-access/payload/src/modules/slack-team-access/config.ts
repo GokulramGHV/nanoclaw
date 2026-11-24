@@ -102,8 +102,24 @@ export async function saveConfig(input: SaveInput): Promise<void> {
   );
 }
 
-/** Delete the instance's config (module off for it). Channels already wired stay wired. */
-export async function removeConfig(instance: string): Promise<boolean> {
+/**
+ * Delete the instance's config (module off for it). Refused while channels auto-wired to its agent group
+ * still have that wiring, because they would lose the gate; pass releaseAutoWired to keep them wired by hand.
+ */
+export async function removeConfig(instance: string, releaseAutoWired = false): Promise<boolean> {
+  const existing = await getDb().get<{ agent_group_id: string }>(
+    'SELECT agent_group_id FROM slack_team_access WHERE instance = ?',
+    instance,
+  );
+  if (!existing) return false;
+  const live = await autoWiredOf(instance, existing.agent_group_id);
+  if (live.length > 0 && !releaseAutoWired) {
+    throw new Error(
+      `${live.length} channel(s) on ${instance} were auto-wired and would lose the user-group gate. ` +
+        'Delete their wirings, or pass --release-auto-wired to keep them wired by hand (the owner then gates them).',
+    );
+  }
+  for (const id of live) await getDb().run('DELETE FROM slack_team_access_wired WHERE messaging_group_id = ?', id);
   const res = await getDb().run('DELETE FROM slack_team_access WHERE instance = ?', instance);
   return res.changes > 0;
 }
@@ -122,14 +138,17 @@ async function autoWiredOf(instance: string, agentGroupId: string): Promise<stri
 }
 
 /** Whether this channel's wiring to the agent group is the one this module created (and still exists). */
-export async function isAutoWired(messagingGroupId: string, agentGroupId: string): Promise<boolean> {
+export async function isAutoWired(messagingGroupId: string, agentGroupId: string, wiringId?: string): Promise<boolean> {
   const row = await getDb().get<{ n: number }>(
     `SELECT 1 AS n FROM slack_team_access_wired w
        JOIN messaging_group_agents mga ON mga.id = w.wiring_id
       WHERE w.messaging_group_id = ? AND w.agent_group_id = ?
-        AND mga.messaging_group_id = w.messaging_group_id AND mga.agent_group_id = w.agent_group_id`,
+        AND mga.messaging_group_id = w.messaging_group_id AND mga.agent_group_id = w.agent_group_id
+        AND (? IS NULL OR w.wiring_id = ?)`,
     messagingGroupId,
     agentGroupId,
+    wiringId ?? null,
+    wiringId ?? null,
   );
   return row !== undefined;
 }

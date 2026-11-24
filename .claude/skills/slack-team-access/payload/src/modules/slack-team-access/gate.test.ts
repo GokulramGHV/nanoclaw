@@ -21,12 +21,14 @@ import {
   teardownChannelAdapters,
 } from '../../channels/channel-registry.js';
 import type { ChannelDefaults } from '../../channels/adapter.js';
-import { registerMessageInterceptor, routeInbound } from '../../router.js';
+import { registerAccessGrant, registerMessageInterceptor, routeInbound } from '../../router.js';
+import { dispatchResponse, registerResponseHandler } from '../../response-registry.js';
+import { createPendingQuestion, createSession } from '../../db/sessions.js';
 import { upsertUser } from '../permissions/db/users.js';
 import { grantRole } from '../permissions/db/user-roles.js';
 import { isMember } from '../permissions/db/agent-group-members.js';
 import './db/migrations.js';
-import { saveConfig } from './config.js';
+import { removeConfig, saveConfig } from './config.js';
 import { createTeamAccess, type TeamAccessDeps } from './gate.js';
 
 const defaults: ChannelDefaults = {
@@ -77,7 +79,12 @@ const now = () => new Date().toISOString();
 
 beforeAll(async () => {
   await import('../permissions/index.js');
-  registerMessageInterceptor(createTeamAccess(deps));
+  const access = createTeamAccess(deps);
+  registerMessageInterceptor(access.intercept);
+  registerAccessGrant(access.grant);
+  registerResponseHandler(access.responseHandler, { prepend: true });
+  // Stands in for the approvals module: claims anything the module let through.
+  registerResponseHandler(async (p) => (p.questionId.startsWith('appr-') ? 'accepted' : false));
   await initChannelAdapters(() => ({ onInbound() {}, onInboundEvent() {}, onMetadata() {}, onAction() {} }));
 });
 afterAll(async () => {
@@ -280,7 +287,7 @@ describe('user-group gate and auto-wire', () => {
     expect(deliverMock).not.toHaveBeenCalled();
     expect(await isMember('slack:UMEMBER', 'ag-team')).toBe(false); // no lasting membership
     expect(await count('SELECT COUNT(*) AS c FROM slack_team_access_wired')).toBe(1);
-    expect(await count('SELECT COUNT(*) AS c FROM slack_team_access_grants')).toBe(0);
+    expect(await count('SELECT COUNT(*) AS c FROM agent_group_members')).toBe(0);
   });
 
   it('another member in the auto-wired channel is admitted; a non-member is refused', async () => {
@@ -396,50 +403,65 @@ describe('already wired channels', () => {
   });
 });
 
-describe('temporary membership and the wired record', () => {
+describe('access grant and the wired record', () => {
   const mgFor = async (platformId: string) => (await getMessagingGroupByPlatform('slack', platformId, INSTANCE))!;
+  const membersCount = () => count('SELECT COUNT(*) AS c FROM agent_group_members');
 
-  it('I-2: the membership exists only while the message routes; an owner-granted one is untouched', async () => {
+  it('I-2: admitted without any agent-group membership row, ever', async () => {
     await configure();
-    ctl.members.mockResolvedValue(['UMEMBER', 'UOWNED']);
-    await upsertUser({ id: 'slack:UOWNED', kind: 'slack', display_name: null, created_at: now() });
-    await getDb().run(
-      "INSERT INTO agent_group_members (user_id, agent_group_id, added_by, added_at) VALUES ('slack:UOWNED','ag-team',NULL,?)",
-      now(),
-    );
+    ctl.members.mockResolvedValue(['UMEMBER', 'UTWO']);
     await routeInbound(event({}));
-    await routeInbound(event({ user: 'UOWNED' }));
+    await routeInbound(event({ user: 'UTWO' }));
     expect(await woke()).toBe(2);
-    expect(await isMember('slack:UMEMBER', 'ag-team')).toBe(false);
-    expect(await isMember('slack:UOWNED', 'ag-team')).toBe(true);
-    expect(await count("SELECT COUNT(*) AS c FROM agent_group_members WHERE agent_group_id = 'ag-team'")).toBe(1);
+    expect(await membersCount()).toBe(0);
   });
 
-  it('I-2: a person who left the user group is refused at once, with no membership to fall back on', async () => {
+  it('I-2: the grant is for that wiring only: the same member on a hand-wired strict channel is not admitted', async () => {
+    await configure();
+    await routeInbound(event({}));
+    await createMessagingGroup({
+      id: 'mg-hand',
+      channel_type: 'slack',
+      platform_id: 'slack:C900',
+      instance: 'slack',
+      name: null,
+      is_group: 1,
+      unknown_sender_policy: 'strict',
+      created_at: now(),
+    });
+    await createMessagingGroupAgent({
+      id: 'mga-h',
+      messaging_group_id: 'mg-hand',
+      agent_group_id: 'ag-team',
+      engage_mode: 'mention',
+      engage_pattern: null,
+      sender_scope: 'known',
+      ignored_message_policy: 'drop',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: now(),
+    });
+    const before = await woke();
+    await routeInbound(event({ platformId: 'slack:C900', instance: 'slack' }));
+    expect(await woke()).toBe(before);
+  });
+
+  it('I-2: a person who left the user group is refused at once', async () => {
     await configure();
     await routeInbound(event({}));
     ctl.members.mockResolvedValue(['USOMEONE']);
     ctl.clock += 61_000;
     await routeInbound(event({}));
     expect(await woke()).toBe(1);
-    expect(await isMember('slack:UMEMBER', 'ag-team')).toBe(false);
   });
 
-  it('I-2: a leftover grant from a crashed run is swept at the next start', async () => {
+  it('I-2: a lookup failure gives no grant', async () => {
     await configure();
-    await upsertUser({ id: 'slack:ULEFT', kind: 'slack', display_name: null, created_at: now() });
-    await getDb().run(
-      "INSERT INTO agent_group_members (user_id, agent_group_id, added_by, added_at) VALUES ('slack:ULEFT','ag-team',NULL,?)",
-      now(),
-    );
-    await getDb().run(
-      "INSERT INTO slack_team_access_grants (user_id, agent_group_id, created_at) VALUES ('slack:ULEFT','ag-team',?)",
-      now(),
-    );
-    const fresh = createTeamAccess(deps); // a new process: its first message sweeps
-    await fresh(event({ mention: false }));
-    expect(await isMember('slack:ULEFT', 'ag-team')).toBe(false);
-    expect(await count('SELECT COUNT(*) AS c FROM slack_team_access_grants')).toBe(0);
+    await routeInbound(event({}));
+    ctl.members.mockRejectedValue(new Error('boom'));
+    ctl.clock += 61_000;
+    await routeInbound(event({}));
+    expect(await woke()).toBe(1);
   });
 
   it('I-3: a stale wired row (wiring deleted) is replaced on the next member tag, not a permanent drop', async () => {
@@ -545,6 +567,93 @@ describe('group lookup failure', () => {
     await routeInbound(event({}));
     expect(await wiringsOn('slack:C100')).toHaveLength(0);
     expect(await drops('slack_team_access_misconfigured')).toBe(1);
+  });
+});
+
+describe('removing the config', () => {
+  it('is refused while auto-wired channels exist, and --release keeps them wired by hand', async () => {
+    await configure();
+    await routeInbound(event({}));
+    await expect(removeConfig(INSTANCE)).rejects.toThrow(/auto-wired/);
+    expect(await removeConfig(INSTANCE, true)).toBe(true);
+    expect(await count('SELECT COUNT(*) AS c FROM slack_team_access_wired')).toBe(0);
+  });
+});
+
+describe('question card answers', () => {
+  async function card(id: string, agentGroupId = 'ag-team') {
+    await createMessagingGroup({
+      id: 'mg-q',
+      channel_type: 'slack',
+      platform_id: 'slack:C700',
+      instance: INSTANCE,
+      name: null,
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    }).catch(() => {});
+    await createSession({
+      id: 'sess-q',
+      agent_group_id: agentGroupId,
+      messaging_group_id: 'mg-q',
+      thread_id: null,
+      agent_provider: null,
+      status: 'active',
+      container_status: 'idle',
+      last_active: null,
+      created_at: now(),
+    }).catch(() => {});
+    await createPendingQuestion({
+      question_id: id,
+      session_id: 'sess-q',
+      message_out_id: 'o1',
+      platform_id: 'slack:C700',
+      channel_type: 'slack',
+      thread_id: null,
+      title: 't',
+      options: [],
+      created_at: now(),
+    });
+  }
+  const click = (questionId: string, userId: string | null, instance = INSTANCE) =>
+    dispatchResponse({
+      questionId,
+      instance,
+      value: 'yes',
+      userId,
+      channelType: 'slack',
+      platformId: 'slack:C700',
+      threadId: null,
+    });
+
+  it('refuses a non-member, lets a member through to the next handler', async () => {
+    await configure();
+    await card('q-1');
+    expect(await click('q-1', 'USTRANGER')).toBe('refused');
+    // a member: not claimed by this module, falls to the next handler (none claims q-1)
+    expect(await click('q-1', 'UMEMBER')).toBe('ignored');
+  });
+
+  it('refuses when the lookup fails or there is no clicker id', async () => {
+    await configure();
+    await card('q-2');
+    ctl.members.mockRejectedValue(new Error('boom'));
+    expect(await click('q-2', 'UMEMBER')).toBe('refused');
+    expect(await click('q-2', null)).toBe('refused');
+  });
+
+  it('does not touch a card in another agent group, or on an instance with no row', async () => {
+    await configure();
+    await card('q-3', 'ag-other');
+    expect(await click('q-3', 'USTRANGER')).toBe('ignored');
+    await card('q-4');
+    expect(await click('q-4', 'USTRANGER', 'slack-norow')).toBe('ignored');
+  });
+
+  it('never sees an approval click: no pending-question row, no lookup, passes straight through', async () => {
+    await configure();
+    expect(await click('appr-1', 'USTRANGER')).toBe('accepted');
+    expect(ctl.members).not.toHaveBeenCalled();
   });
 });
 

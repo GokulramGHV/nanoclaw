@@ -20,7 +20,7 @@ import { getConfig, removeConfig, saveConfig } from '../../../../src/modules/sla
 
 const USAGE =
   'Usage: slack-team-access.ts set <instance> --agent-group <id> [--user-group S...] [--auto-wire] [--allow-external] [--release-auto-wired] [--refusal-note "..."] [--external-note "..."]\n' +
-  '       slack-team-access.ts show <instance> | remove <instance>';
+  '       slack-team-access.ts show <instance> | remove <instance> [--release-auto-wired]';
 
 const [, , command, instance, ...rest] = process.argv;
 if (!['set', 'show', 'remove'].includes(command ?? '') || !instance || instance.startsWith('--')) {
@@ -63,7 +63,11 @@ try {
       releaseAutoWired: flags.get('release-auto-wired') === true,
     });
   } else if (command === 'remove') {
-    console.log((await removeConfig(instance)) ? `${instance}: team access removed` : `${instance}: no config`);
+    console.log(
+      (await removeConfig(instance, flags.get('release-auto-wired') === true))
+        ? `${instance}: team access removed`
+        : `${instance}: no config`,
+    );
   }
   if (command !== 'remove') {
     const cfg = await getConfig(instance);

@@ -25,13 +25,6 @@ registerMigration({
         wiring_id          TEXT NOT NULL,
         created_at         TEXT NOT NULL
       );
-      -- Memberships added for the length of one routed message; swept at startup if a crash left any.
-      CREATE TABLE slack_team_access_grants (
-        user_id        TEXT NOT NULL,
-        agent_group_id TEXT NOT NULL,
-        created_at     TEXT NOT NULL,
-        PRIMARY KEY (user_id, agent_group_id)
-      );
     `);
   },
 });
