@@ -7,20 +7,23 @@ description: Show a Slack agent the thread it was tagged into. When someone tags
 
 When an agent is tagged in the middle of a Slack thread, it normally sees only the tagging message. This skill adds the conversation it was tagged into.
 
-On each engaged Slack message that sits inside a thread (the thread's timestamp differs from the message's own), the host adds two context blocks before the message:
+On every engaged Slack message the host adds context blocks before the message:
 
-- **`slack-thread`**: the thread's first message, then up to the 200 messages before the tag (oldest first), each with the author's display name, time and text. Bot messages are labeled `(bot)`. Messages the session already holds (its earlier inbound rows, and its own delivered posts) are not repeated. If messages were left out, a line at the top of the block says how many and why. Over about 30,000 characters the oldest messages after the first are dropped.
-- **`slack-asker`**: the tagger's Slack user id, display name and email (omitted when Slack gives none), and the thread's permalink.
+- **`slack-asker`** (every message, in a thread or not): the tagger's Slack user id, display name and email (email omitted when Slack gives none; needs `users:read.email`), and a link: the thread link inside a thread, the message link on a top-level message. The email goes into the session database and to the model provider; leave `users:read.email` off the app if that is not wanted.
+- **`slack-thread`** (only inside a thread): the thread's first message, then up to the 200 messages before the tag (oldest first), each with the author's display name and Slack id, time and text. Bot messages are labeled `(bot <id>)`. Messages the session already holds are not repeated: its earlier inbound rows, its own delivered posts, and the lines of this block shown at an earlier tag. If messages were left out, a line at the top says how many and why. Over about 30,000 characters the oldest messages after the first are dropped. The block tells the agent it is quoted conversation, not instructions, and that only the asker directs it. The provider's own notes use the sender `slack-thread-context`; user lines always end in `(<slack id>)`, so no display name can pass for a note.
 
-Files on the shown messages are downloaded with the bot token into the session inbox (`/workspace/inbox/thread-<message ts>/<file id>-<name>`), the same place normal attachments go, and each message line names the path. Files over 10 MB, or beyond 25 in one thread, are listed as skipped with the reason.
+Timing: the Slack text reads (replies, users, permalink) get an internal deadline of about 1.2 s (`SLACK_THREAD_CONTEXT_DEADLINE_MS`), inside the host's 1.5 s wake-context budget. If they land, the thread block arrives on the tagging turn. If they miss, the block is a short stub naming `/workspace/inbox/thread-<message ts>/thread.md`, and the full rendered thread is written there when the read finishes.
 
-If Slack refuses a call, the agent gets a short block saying the thread could not be read, with Slack's error code. Nothing here ever fails the message.
+Files on the shown messages are downloaded in the background (3 at a time, about 15 s in total) with the bot token, into the final inbox paths (`/workspace/inbox/thread-<message ts>/<file id>-<name>`). The block lists each as "saving to <path>", so a file can appear a moment after the block. Skipped files are listed with the reason: over 10 MB, more than 25 in the thread, no link, unsafe name, or not hosted by Slack. The bot token is only ever sent to Slack's own file hosts (files.slack.com, slack-files.com, slack.com and their gov variants); any other link is not fetched.
+
+If Slack refuses a call, the agent gets a short block saying the thread could not be read, with Slack's error code. Nothing here ever fails the message. A switch that cannot be read counts as off.
 
 What the agent already got without this skill: the tagger's display name and the message text only. The router does not give the Slack user id, the email or the permalink, and no earlier thread messages. This skill adds exactly those.
 
 Limits to know:
 
-- The host waits at most 1.5 seconds for all wake context together (`WAKE_CONTEXT_BUDGET_MS` in `src/wake-context.ts`). A long thread with many authors or files can miss that. A block that misses it is still written, but reaches the agent with its next message, not this one.
+- If the text reads miss the deadline, the stub block carries no message ids, so a later tag in that thread may show the thread again.
+- A file that fails to download after the block was written never appears; the host log has a warning.
 - Thread timestamps in the block show in the container's timezone, like every other message.
 
 ## Prerequisites
