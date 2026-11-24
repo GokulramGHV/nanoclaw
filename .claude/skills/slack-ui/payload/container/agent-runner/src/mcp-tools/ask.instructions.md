@@ -1,6 +1,13 @@
+## Which tool to use in Slack
+
+- To show information or a link: a plain message, or `send_card` for a titled card with link buttons. `send_card` cannot collect an answer.
+- To ask a choice and wait for the answer: `ask`.
+- For a fixed workflow or form that has a card template (a request, an approval): `post_card` with that template.
+- Never put a question in `send_card` or in plain text when `ask` fits.
+
 ## Asking questions in Slack (`ask`)
 
-In a Slack chat, ask questions with `mcp__nanoclaw__ask`. `ask_user_question` is not available there: where other instructions say to use `ask_user_question`, use `ask` in Slack chats instead. In other chats, `ask_user_question` is the tool and `ask` does not exist.
+In a Slack chat, ask questions with `mcp__nanoclaw__ask`. `ask_user_question` is not available there: where other instructions or tool descriptions (such as `send_card`'s) say to use `ask_user_question`, use `ask` in Slack chats instead. In other chats, `ask_user_question` is the tool and `ask` does not exist.
 
 - One card can carry up to 4 questions. Each has 2 to 10 options; set `multiSelect` when more than one may apply.
 - Give an option a short `description` when it helps people choose.
