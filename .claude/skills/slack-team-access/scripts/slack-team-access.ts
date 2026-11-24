@@ -3,7 +3,7 @@
  *
  * Usage:
  *   slack-team-access.ts set <instance> --agent-group <id> [--user-group S...] [--auto-wire]
- *                        [--allow-external] [--refusal-note "..."] [--external-note "..."]
+ *                        [--allow-external] [--release-auto-wired] [--refusal-note "..."] [--external-note "..."]
  *   slack-team-access.ts show <instance>
  *   slack-team-access.ts remove <instance>
  *
@@ -19,7 +19,7 @@ import { closeDb, initDb } from '../../../../src/db/connection.js';
 import { getConfig, removeConfig, saveConfig } from '../../../../src/modules/slack-team-access/config.js';
 
 const USAGE =
-  'Usage: slack-team-access.ts set <instance> --agent-group <id> [--user-group S...] [--auto-wire] [--allow-external] [--refusal-note "..."] [--external-note "..."]\n' +
+  'Usage: slack-team-access.ts set <instance> --agent-group <id> [--user-group S...] [--auto-wire] [--allow-external] [--release-auto-wired] [--refusal-note "..."] [--external-note "..."]\n' +
   '       slack-team-access.ts show <instance> | remove <instance>';
 
 const [, , command, instance, ...rest] = process.argv;
@@ -36,7 +36,7 @@ for (let i = 0; i < rest.length; i++) {
     process.exit(2);
   }
   const name = a.slice(2);
-  if (['auto-wire', 'allow-external'].includes(name)) flags.set(name, true);
+  if (['auto-wire', 'allow-external', 'release-auto-wired'].includes(name)) flags.set(name, true);
   else if (['agent-group', 'user-group', 'refusal-note', 'external-note'].includes(name) && rest[i + 1] !== undefined) {
     flags.set(name, rest[++i]);
   } else {
@@ -60,6 +60,7 @@ try {
       refuseExternal: flags.get('allow-external') !== true,
       refusalNote: str('refusal-note'),
       externalNote: str('external-note'),
+      releaseAutoWired: flags.get('release-auto-wired') === true,
     });
   } else if (command === 'remove') {
     console.log((await removeConfig(instance)) ? `${instance}: team access removed` : `${instance}: no config`);

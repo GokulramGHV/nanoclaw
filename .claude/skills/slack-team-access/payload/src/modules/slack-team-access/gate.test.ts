@@ -278,8 +278,9 @@ describe('user-group gate and auto-wire', () => {
     });
     expect(await woke()).toBe(1);
     expect(deliverMock).not.toHaveBeenCalled();
-    expect(await isMember('slack:UMEMBER', 'ag-team')).toBe(true);
+    expect(await isMember('slack:UMEMBER', 'ag-team')).toBe(false); // no lasting membership
     expect(await count('SELECT COUNT(*) AS c FROM slack_team_access_wired')).toBe(1);
+    expect(await count('SELECT COUNT(*) AS c FROM slack_team_access_grants')).toBe(0);
   });
 
   it('another member in the auto-wired channel is admitted; a non-member is refused', async () => {
@@ -288,7 +289,7 @@ describe('user-group gate and auto-wire', () => {
     await routeInbound(event({}));
     await routeInbound(event({ user: 'UTWO' }));
     expect(await woke()).toBe(2);
-    expect(await isMember('slack:UTWO', 'ag-team')).toBe(true);
+    expect(await isMember('slack:UTWO', 'ag-team')).toBe(false);
     await routeInbound(event({ user: 'USTRANGER' }));
     expect(await woke()).toBe(2);
     expect(await isMember('slack:USTRANGER', 'ag-team')).toBe(false);
@@ -371,14 +372,121 @@ describe('already wired channels', () => {
     expect(await isMember('slack:UMEMBER', 'ag-team')).toBe(false); // hand-wired: owner's own policy stays
   });
 
-  it('a channel wired to a different agent group is unchanged (no lookups, even for strangers or external)', async () => {
+  it('a channel wired to a different agent group gets no group gate and no auto-wire', async () => {
+    await configure();
+    await wire('ag-other');
+    await routeInbound(event({ platformId: 'slack:C300', user: 'USTRANGER' }));
+    expect(ctl.members).not.toHaveBeenCalled();
+    expect(await woke()).toBe(1);
+  });
+
+  it('I-1: the Slack Connect refusal still covers a channel wired only to another agent group', async () => {
     await configure();
     ctl.ext.mockResolvedValue(true);
     await wire('ag-other');
     await routeInbound(event({ platformId: 'slack:C300', user: 'USTRANGER' }));
+    expect(ctl.ext).toHaveBeenCalled();
+    expect(await woke()).toBe(0);
+    expect(await drops('slack_external_channel')).toBe(1);
+    expect(ctl.ephemeral).toHaveBeenCalledTimes(1);
+    // and on an instance with no row, nothing changes
+    ctl.ext.mockClear();
+    await routeInbound({ ...event({ platformId: 'slack:C300' }), instance: 'slack-norow' });
     expect(ctl.ext).not.toHaveBeenCalled();
-    expect(ctl.members).not.toHaveBeenCalled();
+  });
+});
+
+describe('temporary membership and the wired record', () => {
+  const mgFor = async (platformId: string) => (await getMessagingGroupByPlatform('slack', platformId, INSTANCE))!;
+
+  it('I-2: the membership exists only while the message routes; an owner-granted one is untouched', async () => {
+    await configure();
+    ctl.members.mockResolvedValue(['UMEMBER', 'UOWNED']);
+    await upsertUser({ id: 'slack:UOWNED', kind: 'slack', display_name: null, created_at: now() });
+    await getDb().run(
+      "INSERT INTO agent_group_members (user_id, agent_group_id, added_by, added_at) VALUES ('slack:UOWNED','ag-team',NULL,?)",
+      now(),
+    );
+    await routeInbound(event({}));
+    await routeInbound(event({ user: 'UOWNED' }));
+    expect(await woke()).toBe(2);
+    expect(await isMember('slack:UMEMBER', 'ag-team')).toBe(false);
+    expect(await isMember('slack:UOWNED', 'ag-team')).toBe(true);
+    expect(await count("SELECT COUNT(*) AS c FROM agent_group_members WHERE agent_group_id = 'ag-team'")).toBe(1);
+  });
+
+  it('I-2: a person who left the user group is refused at once, with no membership to fall back on', async () => {
+    await configure();
+    await routeInbound(event({}));
+    ctl.members.mockResolvedValue(['USOMEONE']);
+    ctl.clock += 61_000;
+    await routeInbound(event({}));
     expect(await woke()).toBe(1);
+    expect(await isMember('slack:UMEMBER', 'ag-team')).toBe(false);
+  });
+
+  it('I-2: a leftover grant from a crashed run is swept at the next start', async () => {
+    await configure();
+    await upsertUser({ id: 'slack:ULEFT', kind: 'slack', display_name: null, created_at: now() });
+    await getDb().run(
+      "INSERT INTO agent_group_members (user_id, agent_group_id, added_by, added_at) VALUES ('slack:ULEFT','ag-team',NULL,?)",
+      now(),
+    );
+    await getDb().run(
+      "INSERT INTO slack_team_access_grants (user_id, agent_group_id, created_at) VALUES ('slack:ULEFT','ag-team',?)",
+      now(),
+    );
+    const fresh = createTeamAccess(deps); // a new process: its first message sweeps
+    await fresh(event({ mention: false }));
+    expect(await isMember('slack:ULEFT', 'ag-team')).toBe(false);
+    expect(await count('SELECT COUNT(*) AS c FROM slack_team_access_grants')).toBe(0);
+  });
+
+  it('I-3: a stale wired row (wiring deleted) is replaced on the next member tag, not a permanent drop', async () => {
+    await configure();
+    await routeInbound(event({}));
+    const mg = await mgFor('slack:C100');
+    await getDb().run('DELETE FROM messaging_group_agents WHERE messaging_group_id = ?', mg.id);
+    await routeInbound(event({}));
+    expect(await wiringsOn('slack:C100')).toHaveLength(1);
+    expect(await woke()).toBe(2);
+  });
+
+  it('I-3: a channel re-wired by hand to the configured group after its auto-wiring was deleted gets no grants', async () => {
+    await configure();
+    await routeInbound(event({}));
+    const mg = await mgFor('slack:C100');
+    await getDb().run('DELETE FROM messaging_group_agents WHERE messaging_group_id = ?', mg.id);
+    await createMessagingGroupAgent({
+      id: 'mga-hand',
+      messaging_group_id: mg.id,
+      agent_group_id: 'ag-team',
+      engage_mode: 'mention',
+      engage_pattern: null,
+      sender_scope: 'all',
+      ignored_message_policy: 'drop',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: now(),
+    });
+    await getDb().run("UPDATE messaging_groups SET unknown_sender_policy = 'strict' WHERE id = ?", mg.id);
+    await getDb().run("UPDATE messaging_group_agents SET sender_scope = 'known' WHERE id = 'mga-hand'");
+    const before = await woke();
+    await routeInbound(event({}));
+    // gated by the user group (member passes) but the owner's policy (strict, not a member) still applies
+    expect(await woke()).toBe(before);
+    expect(await isMember('slack:UMEMBER', 'ag-team')).toBe(false);
+  });
+
+  it('I-3: changing the agent group is refused while auto-wired channels exist, and --release keeps them wired by hand', async () => {
+    await configure();
+    await routeInbound(event({}));
+    await expect(configure({ agentGroupId: 'ag-other' })).rejects.toThrow(/auto-wired/);
+    await configure({ agentGroupId: 'ag-other', releaseAutoWired: true });
+    expect(await count('SELECT COUNT(*) AS c FROM slack_team_access_wired')).toBe(0);
+    expect(await wiringsOn('slack:C100')).toHaveLength(1);
+    // an unrelated change of group with nothing auto-wired is fine
+    await configure({ agentGroupId: 'ag-team' });
   });
 });
 
@@ -476,7 +584,7 @@ describe('composition with the permissions module', () => {
     await configure();
     await routeInbound(event({}));
     expect(await woke()).toBe(1);
-    expect(await isMember('slack:UMEMBER', 'ag-team')).toBe(true);
+    expect(await isMember('slack:UMEMBER', 'ag-team')).toBe(false);
   });
 });
 

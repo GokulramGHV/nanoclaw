@@ -26,7 +26,8 @@ import { envValue } from '../../env.js';
 import { log } from '../../log.js';
 import type { InboundEvent } from '../../channels/adapter.js';
 import type { MessagingGroup } from '../../types.js';
-import { addMember } from '../permissions/db/agent-group-members.js';
+import { routeInbound } from '../../router.js';
+import { addMember, hasMembershipRow, removeMember } from '../permissions/db/agent-group-members.js';
 import { getUser, upsertUser } from '../permissions/db/users.js';
 import { getConfig, isAutoWired, type TeamAccessConfig } from './config.js';
 import { fetchIsExtShared, fetchUserGroupMembers, postEphemeralNote } from './slack-api.js';
@@ -125,6 +126,9 @@ export function createTeamAccess(deps: TeamAccessDeps = realDeps): (event: Inbou
   const external = new TtlCache<boolean>(EXTERNAL_TTL_MS, deps.now);
   const members = new TtlCache<Set<string>>(MEMBERS_TTL_MS, deps.now);
   const notes = new Map<string, number>();
+  const grants = new Map<string, { count: number; added: boolean; ready: Promise<void> }>();
+  const routing = new WeakSet<InboundEvent>();
+  let swept: Promise<void> | null = null;
 
   function tokenOrThrow(instance: string): string {
     const t = deps.token(instance);
@@ -202,19 +206,87 @@ export function createTeamAccess(deps: TeamAccessDeps = realDeps): (event: Inbou
     return set.has(sender);
   }
 
-  /** Admit a user-group member to the agent group, so the permissions module's own gates let them through. */
-  async function admit(event: InboundEvent, cfg: TeamAccessConfig, handle: string): Promise<void> {
-    if (!(await hasTable(getDb(), 'agent_group_members'))) return;
+  /**
+   * Run `fn` while the user-group member holds a membership of the agent group, so the permissions
+   * module's own gates (which only know members) admit this one message. The row exists only for the
+   * length of the routing: it is removed when the last in-flight message of that user finishes, and a
+   * crash is cleaned up by the startup sweep. A membership the owner granted is never touched.
+   */
+  async function withMembership(
+    event: InboundEvent,
+    cfg: TeamAccessConfig,
+    handle: string,
+    fn: () => Promise<void>,
+  ): Promise<void> {
+    if (!(await hasTable(getDb(), 'agent_group_members'))) return fn();
     const userId = handle.includes(':') ? handle : `${event.channelType}:${handle}`;
-    const at = new Date().toISOString();
-    if (!(await getUser(userId)))
-      await upsertUser({ id: userId, kind: event.channelType, display_name: null, created_at: at });
-    await addMember({
-      user_id: userId,
-      agent_group_id: cfg.agent_group_id,
-      added_by: null,
-      added_at: at,
-    });
+    const key = `${userId}|${cfg.agent_group_id}`;
+    let g = grants.get(key);
+    if (!g) {
+      const fresh: { count: number; added: boolean; ready: Promise<void> } = {
+        count: 0,
+        added: false,
+        ready: Promise.resolve(),
+      };
+      fresh.ready = (async () => {
+        const at = new Date().toISOString();
+        if (!(await getUser(userId)))
+          await upsertUser({ id: userId, kind: event.channelType, display_name: null, created_at: at });
+        if (await hasMembershipRow(userId, cfg.agent_group_id)) return;
+        await getDb().run(
+          'INSERT OR REPLACE INTO slack_team_access_grants (user_id, agent_group_id, created_at) VALUES (?, ?, ?)',
+          userId,
+          cfg.agent_group_id,
+          at,
+        );
+        await addMember({ user_id: userId, agent_group_id: cfg.agent_group_id, added_by: null, added_at: at });
+        fresh.added = true;
+      })();
+      grants.set(key, fresh);
+      g = fresh;
+    }
+    g.count++;
+    const held = g;
+    try {
+      await held.ready;
+      await fn();
+    } finally {
+      held.count--;
+      if (held.count === 0) {
+        if (grants.get(key) === held) grants.delete(key);
+        if (held.added) {
+          try {
+            await removeMember(userId, cfg.agent_group_id);
+            await getDb().run(
+              'DELETE FROM slack_team_access_grants WHERE user_id = ? AND agent_group_id = ?',
+              userId,
+              cfg.agent_group_id,
+            );
+          } catch (err) {
+            log.error('Slack team access: could not remove the temporary membership', { userId, err });
+          }
+        }
+      }
+    }
+  }
+
+  /** Remove memberships a crashed run left behind. Runs once, before the first grant of this process. */
+  async function sweepGrants(): Promise<void> {
+    try {
+      const rows = await getDb().all<{ user_id: string; agent_group_id: string }>(
+        'SELECT user_id, agent_group_id FROM slack_team_access_grants',
+      );
+      for (const r of rows) {
+        await removeMember(r.user_id, r.agent_group_id);
+        await getDb().run(
+          'DELETE FROM slack_team_access_grants WHERE user_id = ? AND agent_group_id = ?',
+          r.user_id,
+          r.agent_group_id,
+        );
+      }
+    } catch (err) {
+      log.error('Slack team access: sweeping leftover memberships failed', { err });
+    }
   }
 
   /** Create the messaging group if needed and wire it to the configured agent group. Throws on any failure. */
@@ -245,10 +317,11 @@ export function createTeamAccess(deps: TeamAccessDeps = realDeps): (event: Inbou
       if (!mg) throw new Error('messaging group disappeared after insert');
     }
     const at = new Date().toISOString();
+    const wiringId = `mga-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     try {
       await getDb().transaction(async () => {
         await createMessagingGroupAgent({
-          id: `mga-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          id: wiringId,
           messaging_group_id: mg!.id,
           agent_group_id: cfg.agent_group_id,
           engage_mode: defaults.engage_mode,
@@ -262,10 +335,15 @@ export function createTeamAccess(deps: TeamAccessDeps = realDeps): (event: Inbou
           priority: 0,
           created_at: at,
         });
+        // A row left by a wiring that was since deleted is replaced, never a conflict.
         await getDb().run(
-          'INSERT INTO slack_team_access_wired (messaging_group_id, agent_group_id, created_at) VALUES (?, ?, ?)',
+          `INSERT INTO slack_team_access_wired (messaging_group_id, agent_group_id, wiring_id, created_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(messaging_group_id) DO UPDATE SET
+             agent_group_id = excluded.agent_group_id, wiring_id = excluded.wiring_id, created_at = excluded.created_at`,
           mg!.id,
           cfg.agent_group_id,
+          wiringId,
           at,
         );
       });
@@ -282,9 +360,41 @@ export function createTeamAccess(deps: TeamAccessDeps = realDeps): (event: Inbou
     return mg;
   }
 
+  /** Slack Connect refusal. True when the message was dropped (shared, or the lookup failed). */
+  async function externalRefused(
+    event: InboundEvent,
+    cfg: TeamAccessConfig,
+    mg: MessagingGroup | undefined,
+    userId: string | null,
+    sender: string | undefined,
+    channel: string,
+    addressed: boolean,
+    content: Record<string, any>,
+  ): Promise<boolean> {
+    if (!cfg.refuse_external) return false;
+    let shared = true;
+    let failed = false;
+    try {
+      const token = tokenOrThrow(cfg.instance);
+      shared = await withTimeout(
+        external.get(`${cfg.instance}|${channel}`, () => deps.isExtShared(token, channel, deps.externalTimeoutMs)),
+        deps.externalTimeoutMs,
+        'conversations.info',
+      );
+    } catch (err) {
+      failed = true;
+      log.warn('Slack team access: shared-channel lookup failed, refusing', { channel, err });
+    }
+    if (!shared) return false;
+    await drop(event, cfg, mg, userId, failed ? 'slack_external_lookup_failed' : 'slack_external_channel', content);
+    if (addressed) await notify('external', cfg, event, channel, sender);
+    return true;
+  }
+
   async function decide(event: InboundEvent, instance: string): Promise<boolean> {
     const cfg = await getConfig(instance);
     if (!cfg) return false; // default off
+    await (swept ??= sweepGrants());
 
     const content = parseContent(event.message.content);
     const handle = rawSender(content);
@@ -298,38 +408,14 @@ export function createTeamAccess(deps: TeamAccessDeps = realDeps): (event: Inbou
     const unwired = wirings.length === 0;
     const wiredToConfigured = wirings.some((w) => w.agent_group_id === cfg.agent_group_id);
 
-    if (!unwired && !wiredToConfigured) return false; // other agent groups: unchanged
     if (unwired && !addressed) return false; // the router drops chatter in unwired channels silently
     if (unwired && found?.mg.denied_at) return false; // denied by the owner stays denied
 
-    // 1. Slack Connect refusal, before anything else.
-    if (cfg.refuse_external) {
-      let shared = true;
-      let failed = false;
-      try {
-        const token = tokenOrThrow(instance);
-        shared = await withTimeout(
-          external.get(`${instance}|${channel}`, () => deps.isExtShared(token, channel, deps.externalTimeoutMs)),
-          deps.externalTimeoutMs,
-          'conversations.info',
-        );
-      } catch (err) {
-        failed = true;
-        log.warn('Slack team access: shared-channel lookup failed, refusing', { channel, err });
-      }
-      if (shared) {
-        await drop(
-          event,
-          cfg,
-          found?.mg,
-          userId,
-          failed ? 'slack_external_lookup_failed' : 'slack_external_channel',
-          content,
-        );
-        if (addressed) await notify('external', cfg, event, channel, sender);
-        return true;
-      }
-    }
+    // 1. Slack Connect refusal, before anything else, on every event the checks above did not skip
+    //    (channels wired only to another agent group included).
+    if (await externalRefused(event, cfg, found?.mg, userId, sender, channel, addressed, content)) return true;
+
+    if (!unwired && !wiredToConfigured) return false; // other agent groups: no group gate, no auto-wire
 
     // Nothing more to enforce or do for an unwired channel when auto-wire is off.
     if (unwired && !cfg.auto_wire) return false;
@@ -366,12 +452,28 @@ export function createTeamAccess(deps: TeamAccessDeps = realDeps): (event: Inbou
     // 3. Auto-wire, then let the router carry on.
     let mg = found?.mg;
     if (unwired) mg = await autoWire(event, cfg, found);
-    if (mg && (unwired || (await isAutoWired(mg.id)))) await admit(event, cfg, handle!);
-    return false;
+    // Only a wiring this module made and still owns gets the per-message membership; a hand-wired
+    // channel keeps the owner's own policy.
+    if (!mg || !(await isAutoWired(mg.id, cfg.agent_group_id))) return false;
+    // The permissions gates need a member, so route the message here under a one-message membership.
+    routing.add(event);
+    try {
+      await withMembership(event, cfg, handle!, async () => {
+        try {
+          await routeInbound(event);
+        } catch (err) {
+          log.error('Slack team access: routing the admitted message failed', { err });
+        }
+      });
+    } finally {
+      routing.delete(event);
+    }
+    return true;
   }
 
   return async (event) => {
     if (event.channelType !== 'slack') return false;
+    if (routing.has(event)) return false; // our own admitted re-entry
     try {
       return await decide(event, event.instance ?? event.channelType);
     } catch (err) {

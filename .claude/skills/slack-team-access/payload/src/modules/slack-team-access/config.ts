@@ -50,6 +50,8 @@ export interface SaveInput {
   refuseExternal?: boolean;
   refusalNote?: string | null;
   externalNote?: string | null;
+  /** Let the agent group change although channels were auto-wired to the old one (they become hand-wired). */
+  releaseAutoWired?: boolean;
 }
 
 const USER_GROUP_ID = /^S[A-Z0-9]{2,}$/;
@@ -65,6 +67,20 @@ export async function saveConfig(input: SaveInput): Promise<void> {
   }
   if (input.autoWire && !userGroup) {
     throw new Error('Auto-wire needs a user group: pass the Slack user group id, or leave auto-wire off');
+  }
+  const existing = await getDb().get<{ agent_group_id: string }>(
+    'SELECT agent_group_id FROM slack_team_access WHERE instance = ?',
+    instance,
+  );
+  if (existing && existing.agent_group_id !== input.agentGroupId) {
+    const live = await autoWiredOf(instance, existing.agent_group_id);
+    if (live.length > 0 && !input.releaseAutoWired) {
+      throw new Error(
+        `${live.length} channel(s) on ${instance} were auto-wired to ${existing.agent_group_id} and would lose the user-group gate. ` +
+          'Delete their wirings, or pass --release-auto-wired to keep them wired by hand (the owner then gates them).',
+      );
+    }
+    for (const id of live) await getDb().run('DELETE FROM slack_team_access_wired WHERE messaging_group_id = ?', id);
   }
   await getDb().run(
     `INSERT INTO slack_team_access
@@ -92,10 +108,28 @@ export async function removeConfig(instance: string): Promise<boolean> {
   return res.changes > 0;
 }
 
-export async function isAutoWired(messagingGroupId: string): Promise<boolean> {
-  const row = await getDb().get<{ messaging_group_id: string }>(
-    'SELECT messaging_group_id FROM slack_team_access_wired WHERE messaging_group_id = ?',
+/** Messaging groups on the instance whose auto-wired wiring to this agent group still exists. */
+async function autoWiredOf(instance: string, agentGroupId: string): Promise<string[]> {
+  const rows = await getDb().all<{ messaging_group_id: string }>(
+    `SELECT w.messaging_group_id FROM slack_team_access_wired w
+       JOIN messaging_groups mg ON mg.id = w.messaging_group_id
+       JOIN messaging_group_agents mga ON mga.id = w.wiring_id AND mga.messaging_group_id = w.messaging_group_id
+      WHERE mg.instance = ? AND w.agent_group_id = ? AND mga.agent_group_id = w.agent_group_id`,
+    instance,
+    agentGroupId,
+  );
+  return rows.map((r) => r.messaging_group_id);
+}
+
+/** Whether this channel's wiring to the agent group is the one this module created (and still exists). */
+export async function isAutoWired(messagingGroupId: string, agentGroupId: string): Promise<boolean> {
+  const row = await getDb().get<{ n: number }>(
+    `SELECT 1 AS n FROM slack_team_access_wired w
+       JOIN messaging_group_agents mga ON mga.id = w.wiring_id
+      WHERE w.messaging_group_id = ? AND w.agent_group_id = ?
+        AND mga.messaging_group_id = w.messaging_group_id AND mga.agent_group_id = w.agent_group_id`,
     messagingGroupId,
+    agentGroupId,
   );
   return row !== undefined;
 }
