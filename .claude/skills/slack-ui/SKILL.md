@@ -194,7 +194,7 @@ Two ready-made examples, one with a user-group rule, are in this skill's `exampl
 ### The JSON file
 
 - `version` must be `2`.
-- `data` declares every field the agent may send. Types are `string` (with `maxLength`, default 3000), `number`, `boolean` and `array` (with `maxItems`, default 50, and `items` as an object schema of the same kind). Unknown fields are rejected.
+- `data` declares every field the agent may send. Types are `string` (with `maxLength`, default 3000), `number`, `boolean` and `array` (with `maxItems`, default 50, and either `items`, an object schema of the same kind, or `"of": "string"` / `"of": "number"` for a plain list such as `["adhoc", "backlog"]`; with `of: "string"`, `maxLength` caps each item, default 3000). A plain string list becomes the state variable of the same name, so `$labels = []` prefills `MultiSelect("labels", $labels, ...)` as `initial_options`. Strings in lists are entity-escaped like all other data. Unknown fields are rejected.
 - `access` holds the press rules, see below.
 - `openui` names the `.oui` file beside the JSON file.
 

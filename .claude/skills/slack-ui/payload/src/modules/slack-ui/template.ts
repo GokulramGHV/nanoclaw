@@ -18,6 +18,8 @@ export interface FieldSpec {
   maxItems?: number;
   /** array only: the object schema of each element. */
   items?: Record<string, FieldSpec>;
+  /** array only: a plain list of strings or numbers instead of objects (excludes `items`). `maxLength` caps each string. */
+  of?: 'string' | 'number';
 }
 
 export interface CardTemplate {
@@ -116,7 +118,13 @@ function checkFieldSpecs(specs: unknown, where: string, problems: string[]): voi
         problems.push(`${at}.${k} must be a positive integer`);
       }
     }
-    if (raw.maxLength !== undefined && type !== 'string') problems.push(`${at}.maxLength only applies to strings`);
+    if (raw.maxLength !== undefined && type !== 'string' && !(type === 'array' && raw.of === 'string'))
+      problems.push(`${at}.maxLength only applies to strings (or arrays of strings)`);
+    if (raw.of !== undefined) {
+      if (type !== 'array') problems.push(`${at}.of only applies to arrays`);
+      else if (raw.of !== 'string' && raw.of !== 'number') problems.push(`${at}.of must be "string" or "number"`);
+      else if (raw.items !== undefined) problems.push(`${at} cannot have both items and of`);
+    }
     if (raw.maxItems !== undefined && type !== 'array') problems.push(`${at}.maxItems only applies to arrays`);
     if (raw.items !== undefined) {
       if (type !== 'array') problems.push(`${at}.items only applies to arrays`);
@@ -275,6 +283,17 @@ export async function findTemplate(groupDir: string, name: string): Promise<{ te
 
 // ── validate ────────────────────────────────────────────────────────────────
 
+function validateScalar(spec: FieldSpec, item: unknown, where: string, problems: string[]): unknown {
+  if (spec.of === 'number') {
+    if (typeof item !== 'number' || !Number.isFinite(item)) problems.push(`field "${where}" must be a number`);
+    return item;
+  }
+  const max = spec.maxLength ?? DEFAULT_MAX_LENGTH;
+  if (typeof item !== 'string') problems.push(`field "${where}" must be a string`);
+  else if (item.length > max) problems.push(`field "${where}" exceeds maxLength ${max}`);
+  return item;
+}
+
 function validateObject(specs: Record<string, FieldSpec>, value: unknown, where: string, problems: string[]): Obj {
   const out: Obj = {};
   if (!isObj(value)) {
@@ -311,7 +330,9 @@ function validateObject(specs: Record<string, FieldSpec>, value: unknown, where:
         else if (v.length > (spec.maxItems ?? DEFAULT_MAX_ITEMS)) {
           problems.push(`field "${at(key)}" exceeds maxItems ${spec.maxItems ?? DEFAULT_MAX_ITEMS}`);
         } else {
-          out[key] = v.map((item, i) => validateObject(spec.items ?? {}, item, `${at(key)}[${i}]`, problems));
+          out[key] = spec.of
+            ? v.map((item, i) => validateScalar(spec, item, `${at(key)}[${i}]`, problems))
+            : v.map((item, i) => validateObject(spec.items ?? {}, item, `${at(key)}[${i}]`, problems));
         }
         break;
     }

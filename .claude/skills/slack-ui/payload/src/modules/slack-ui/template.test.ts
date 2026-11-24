@@ -89,6 +89,63 @@ describe('validateData', () => {
   it('lists every problem at once', () => expect(problemsOf({ extra: 1, n: true })).toHaveLength(3));
 });
 
+describe('validateData arrays of strings and numbers', () => {
+  const t = tpl({
+    data: {
+      labels: { type: 'array', of: 'string', maxItems: 3, maxLength: 5 },
+      nums: { type: 'array', of: 'number' },
+      objs: { type: 'array', items: { name: { type: 'string' } } },
+    },
+  });
+  const problemsOf = (data: unknown): string[] => {
+    try {
+      validateData(t, data);
+    } catch (err) {
+      return (err as TemplateError).problems;
+    }
+    return [];
+  };
+
+  it('accepts string and number lists next to object lists', () => {
+    expect(validateData(t, { labels: ['a', 'bb'], nums: [1, 2.5], objs: [{ name: 'x' }] })).toEqual({
+      labels: ['a', 'bb'],
+      nums: [1, 2.5],
+      objs: [{ name: 'x' }],
+    });
+  });
+  it('rejects mixed items with their path', () =>
+    expect(problemsOf({ labels: ['a', 2, { x: 1 }], nums: [1, 'x'] })).toEqual([
+      'field "labels[1]" must be a string',
+      'field "labels[2]" must be a string',
+      'field "nums[1]" must be a number',
+    ]));
+  it('rejects objects in a string list and strings in an object list', () => {
+    expect(problemsOf({ objs: ['a'] })).toEqual(['objs[0] must be an object']);
+  });
+  it('keeps maxItems and the per-item maxLength', () => {
+    expect(problemsOf({ labels: ['a', 'b', 'c', 'd'] })).toEqual(['field "labels" exceeds maxItems 3']);
+    expect(problemsOf({ labels: ['abcdef'] })).toEqual(['field "labels[0]" exceeds maxLength 5']);
+  });
+  it('defaults string items to 3000 characters and the list to 50 items', () => {
+    const t2 = tpl({ data: { xs: { type: 'array', of: 'string' } } });
+    expect(() => validateData(t2, { xs: ['a'.repeat(3000)] })).not.toThrow();
+    expect(() => validateData(t2, { xs: ['a'.repeat(3001)] })).toThrow(/maxLength 3000/);
+    expect(() => validateData(t2, { xs: Array.from({ length: 51 }, () => 'a') })).toThrow(/maxItems 50/);
+  });
+  it('parseTemplate checks `of`', () => {
+    const json = (data: unknown) => JSON.stringify({ version: 2, data, openui: 'x.oui' });
+    expect(() => parseTemplate(json({ a: { type: 'array', of: 'string' } }), 'n')).not.toThrow();
+    expect(() => parseTemplate(json({ a: { type: 'array', of: 'bool' } }), 'n')).toThrow(/of must be/);
+    expect(() => parseTemplate(json({ a: { type: 'string', of: 'string' } }), 'n')).toThrow(/only applies to arrays/);
+    expect(() => parseTemplate(json({ a: { type: 'array', of: 'string', items: {} } }), 'n')).toThrow(
+      /both items and of/,
+    );
+  });
+  it('escapes list strings like any other data', () => {
+    expect(escapeEntities(validateData(t, { labels: ['a&<b'] }))).toEqual({ labels: ['a&amp;&lt;b'] });
+  });
+});
+
 describe('parseTemplate', () => {
   const good = { version: 2, data: {}, openui: 'x.oui', access: { buttons: 'anyone' } };
 

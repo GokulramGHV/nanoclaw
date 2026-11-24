@@ -337,6 +337,40 @@ describe('post_card', () => {
     expect(JSON.stringify(posts()[0]!.args.blocks)).toContain('a &amp; &lt;b&gt;');
   });
 
+  it('prefills a MultiSelect from a string-array data field', async () => {
+    writeTemplate(
+      'labels-card',
+      JSON.stringify({
+        version: 2,
+        data: { labels: { type: 'array', of: 'string' } },
+        access: { byId: { labels: 'anyone' } },
+        openui: 'labels-card.oui',
+      }),
+      `root = Root([ms])
+$labels = []
+ms = Actions([sel])
+sel = MultiSelect("labels", $labels, [Option("adhoc", "adhoc"), Option("backlog", "backlog"), Option("x&y", "x&y")])`,
+    );
+    await post({ template: 'labels-card', data: { labels: ['adhoc', 'x&y'] } });
+    const card = await getCardById('card-1');
+    expect(card?.state.$labels).toEqual(['adhoc', 'x&amp;y']);
+    const blocks = JSON.stringify(posts()[0]!.args.blocks);
+    expect(blocks).toContain('multi_static_select');
+    expect(blocks).toContain('initial_options');
+    expect(blocks).toContain('adhoc');
+  });
+
+  it('refuses a mixed array for a string-array field', async () => {
+    writeTemplate(
+      'labels-card',
+      JSON.stringify({ version: 2, data: { labels: { type: 'array', of: 'string' } }, openui: 'labels-card.oui' }),
+      `root = Root([])\n$labels = []`,
+    );
+    await post({ template: 'labels-card', data: { labels: ['a', 3] } });
+    expect(posts()).toHaveLength(0);
+    expect(notify).toHaveBeenCalled();
+  });
+
   it('uses threadId when it names the same channel', async () => {
     await post({ threadId: 'slack:C123:1699999999.000100' });
     expect(posts()[0]!.args).toMatchObject({ thread_ts: '1699999999.000100' });
