@@ -217,6 +217,32 @@ describe('update_card', () => {
     expect(JSON.stringify(updates()[0]!.args.blocks)).toContain('Howdy');
   });
 
+  it('saves the template access it has now and keeps the owner', async () => {
+    const before = (await getCardById('card-1'))!;
+    writeTemplate(JSON.stringify({ ...JSON.parse(templateJson), access: { default: 'anyone' } }));
+    await update();
+    expect(notify).not.toHaveBeenCalled();
+    const after = (await getCardById('card-1'))!;
+    expect(after.access).toEqual({ default: 'anyone' });
+    expect(after.owner).toBe(before.owner);
+  });
+
+  it('turns a card that stays busy into a notice and changes nothing', async () => {
+    const card = (await getCardById('card-1'))!;
+    await kit.store.put(
+      {
+        ...card,
+        locked: { by: 'U1', at: new Date().toISOString(), label: 'Go' },
+        finishing: true,
+        version: card.version + 1,
+      },
+      card.version,
+    );
+    await update();
+    failed(/busy/);
+    expect((await getCardById('card-1'))?.state.$note).toBe('Beginning');
+  }, 10000);
+
   it("refuses another agent group's card", async () => {
     await update({}, otherGroupSession);
     failed(/no card with that id/);
@@ -251,6 +277,9 @@ describe('update_card', () => {
 
   it('rejects a missing cardId and a missing token', async () => {
     await update({ cardId: '' });
+    failed(/invalid cardId/);
+    notify.mockClear();
+    await update({ cardId: 'a b/c' });
     failed(/invalid cardId/);
     notify.mockClear();
     vi.mocked(envValue).mockReturnValue(undefined);

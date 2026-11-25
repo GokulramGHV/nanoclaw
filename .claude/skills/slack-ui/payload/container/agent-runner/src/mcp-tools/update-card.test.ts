@@ -37,6 +37,8 @@ describe('update_card', () => {
       { cardId: '' },
       { cardId: '  ' },
       { cardId: 5 },
+      { cardId: 'a b' },
+      { cardId: 'x'.repeat(65) },
       {},
       { cardId: 'ok', data: null },
       { cardId: 'ok', data: [1] },

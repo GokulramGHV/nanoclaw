@@ -7,3 +7,4 @@
 - It works on a card that was already pressed or closed: the card stays locked and keeps its locked look, with the new content.
 - Any session of this agent group can update the card, not only the one that posted it. A card from another agent group, or a question made with `ask`, cannot be updated.
 - The call returns at once. If the update fails, a system message starting `update_card failed:` arrives later. Do not retry blindly; read the reason and fix the data.
+- If `update_card failed:` names a Slack error, the card may be unchanged: sending the same update again fixes it.

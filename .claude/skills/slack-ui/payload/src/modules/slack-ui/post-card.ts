@@ -29,7 +29,7 @@ import { notifyCardFailure } from './notify.js';
 import { slackClientForToken } from './slack-client.js';
 import { escapeEntities, findTemplate, TemplateError, validateData } from './template.js';
 
-const CARD_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+export const CARD_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
 class PostCardError extends Error {}
 

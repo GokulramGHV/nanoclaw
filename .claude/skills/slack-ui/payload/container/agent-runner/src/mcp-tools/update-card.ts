@@ -10,6 +10,9 @@ import { getCurrentInReplyTo } from '../db/session-state.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
+/** Same shape post_card gives its card ids (the host checks the same pattern). */
+const CARD_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
 function log(msg: string): void {
   console.error(`[mcp-tools] ${msg}`);
 }
@@ -51,6 +54,7 @@ export const updateCard: McpToolDefinition = {
     const rawId = args.cardId;
     if (typeof rawId !== 'string' || !rawId.trim()) return err('cardId must be a non-empty string');
     const cardId = rawId.trim();
+    if (!CARD_ID_RE.test(cardId)) return err('cardId is not a valid card id');
 
     const data = args.data === undefined ? {} : args.data;
     if (typeof data !== 'object' || data === null || Array.isArray(data)) return err('data must be an object');

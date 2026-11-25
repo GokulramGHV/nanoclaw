@@ -22,6 +22,7 @@ This skill adds three tools for agents, `post_card`, `update_card` and `ask`, an
 
 - The agent calls `update_card({ cardId, data })` to redraw a card its agent group posted earlier, in place (the same Slack message). The card keeps its template, owner and press rules. Use it for a card whose content changes over time, such as a status card, or a report a scheduled task refreshes.
 - The agent sends the full `data` each time. The host looks the template up again (so a template edit is picked up) and validates `data` the same way as `post_card`. Fields the template declares in `data` are replaced by what was sent, and a missing optional field falls back to the source's default. State the source owns (such as a `$choice` variable a control sets) is kept.
+- The card's press rules are replaced by the template's current ones; the owner stays. If a click is still being saved the update waits about a second, then fails with a "busy" notice.
 - A locked or closed card stays locked and keeps its locked look and footer; no live control comes back.
 - Any session of the same agent group can update the card, not only the one that posted it. A card of another group, or an `ask` card, cannot be updated.
 - The update uses the card's own Slack instance token. A failure arrives as a system message starting `update_card failed:`.

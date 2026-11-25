@@ -19,7 +19,7 @@ import type { Session } from '../../types.js';
 import { getCardById } from './db/kit-cards.js';
 import { kit } from './kit.js';
 import { notifyCardFailure } from './notify.js';
-import { shortMessage } from './post-card.js';
+import { CARD_ID_RE, shortMessage } from './post-card.js';
 import { slackClientForToken } from './slack-client.js';
 import { escapeEntities, findTemplate, TemplateError, validateData } from './template.js';
 
@@ -27,7 +27,7 @@ class UpdateCardError extends Error {}
 
 async function updateCard(content: Record<string, unknown>, session: Session): Promise<void> {
   const { cardId } = content;
-  if (typeof cardId !== 'string' || cardId === '') throw new UpdateCardError('invalid cardId');
+  if (typeof cardId !== 'string' || !CARD_ID_RE.test(cardId)) throw new UpdateCardError('invalid cardId');
 
   const card = await getCardById(cardId);
   // One message for every kind of miss, so a card of another group is not confirmed to exist.
@@ -55,22 +55,23 @@ async function updateCard(content: Record<string, unknown>, session: Session): P
   }
   if (template.source === undefined) throw new UpdateCardError('template has no OpenUI source');
 
-  // Declared data fields are replaced by what was sent (a missing optional one falls back to the
-  // source's default); every other key is state the template source owns and is kept.
-  const state: Record<string, unknown> = { ...card.state };
-  for (const key of Object.keys(template.data)) delete state['$' + key];
-  for (const [key, value] of Object.entries(escapeEntities(data))) state['$' + key] = value;
+  // The kit merges on each attempt, from the card as it is then: the declared data fields are
+  // replaced by what was sent (a missing optional one falls back to the source's default), and every
+  // other key is state the template source owns and is kept. A later click or lock is never undone.
+  const replace = {
+    data: escapeEntities(data),
+    replaceKeys: Object.keys(template.data),
+    source: template.source,
+    access: template.access,
+  };
 
   try {
-    await kit.render(template.source, state);
+    await kit.render(template.source, Object.fromEntries(Object.entries(replace.data).map(([k, v]) => ['$' + k, v])));
   } catch (err) {
     throw new UpdateCardError(`template ${templateName} could not be rendered: ${shortMessage(err)}`);
   }
-  const done = await kit.updateCard(slackClientForToken(token), card.channel, card.ts, {
-    state,
-    source: template.source,
-  });
-  if (!done) throw new UpdateCardError('the card could not be updated');
+  const done = await kit.updateCard(slackClientForToken(token), card.channel, card.ts, replace);
+  if (!done) throw new UpdateCardError('the card is busy or is gone, try again');
 }
 
 export async function handleUpdateCard(content: Record<string, unknown>, session: Session): Promise<void> {
