@@ -10,6 +10,7 @@
 
    ```typescript
    import './post-card.js';
+   import './update-card.js';
    import './ask.js';
    ```
 
@@ -21,6 +22,10 @@
          container/agent-runner/src/mcp-tools/post-card.test.ts \
          container/agent-runner/src/mcp-tools/post-card.instructions.md \
          container/agent-runner/src/mcp-tools/post-card-registration.test.ts \
+         container/agent-runner/src/mcp-tools/update-card.ts \
+         container/agent-runner/src/mcp-tools/update-card.test.ts \
+         container/agent-runner/src/mcp-tools/update-card.instructions.md \
+         container/agent-runner/src/mcp-tools/update-card-registration.test.ts \
          container/agent-runner/src/mcp-tools/ask.ts \
          container/agent-runner/src/mcp-tools/ask.test.ts \
          container/agent-runner/src/mcp-tools/ask.instructions.md \
