@@ -227,6 +227,15 @@ describe('update_card', () => {
     expect(after.owner).toBe(before.owner);
   });
 
+  it('clears old rules when the template no longer has an access section', async () => {
+    writeTemplate(JSON.stringify({ ...JSON.parse(templateJson), access: { default: 'anyone' } }));
+    await update();
+    expect((await getCardById('card-1'))?.access).toEqual({ default: 'anyone' });
+    writeTemplate(templateJson);
+    await update();
+    expect((await getCardById('card-1'))?.access).toEqual({});
+  });
+
   it('turns a card that stays busy into a notice and changes nothing', async () => {
     const card = (await getCardById('card-1'))!;
     await kit.store.put(

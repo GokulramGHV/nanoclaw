@@ -62,7 +62,7 @@ async function updateCard(content: Record<string, unknown>, session: Session): P
     data: escapeEntities(data),
     replaceKeys: Object.keys(template.data),
     source: template.source,
-    access: template.access,
+    access: template.access ?? {},
   };
 
   try {
