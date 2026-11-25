@@ -58,7 +58,7 @@ zod@4.6.7
 `slack-ui-kit` is not on npm. It installs from a GitHub release tag, pinned to that tag:
 
 ```nc:run effect:external
-pnpm add github:GokulramGHV/slack-ui-kit#v0.1.4
+pnpm add github:GokulramGHV/slack-ui-kit#v0.1.5
 ```
 
 The kit depends on `@openuidev/lang-core`, whose install script is telemetry. pnpm skips it, and it stays skipped: never add `@openuidev/lang-core` to `onlyBuiltDependencies` in `pnpm-workspace.yaml`. The module also sets `OPENUI_TELEMETRY_DISABLED=1` before the kit loads.
