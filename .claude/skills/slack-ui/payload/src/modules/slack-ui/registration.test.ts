@@ -13,6 +13,10 @@ describe('slack-ui registration', () => {
     expect(getDeliveryAction('post_card')).toBeDefined();
   });
 
+  it('the modules barrel registers the update_card delivery action', () => {
+    expect(getDeliveryAction('update_card')).toBeDefined();
+  });
+
   it('the modules barrel registers the ask delivery action', () => {
     expect(getDeliveryAction('ask')).toBeDefined();
   });

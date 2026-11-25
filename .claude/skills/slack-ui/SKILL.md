@@ -5,7 +5,7 @@ description: Add interactive Slack cards and questions to NanoClaw agents. An ag
 
 # Slack UI cards
 
-This skill adds two tools for agents, `post_card` and `ask`, and the host code behind them. Cards are drawn and tracked by the `slack-ui-kit` package.
+This skill adds three tools for agents, `post_card`, `update_card` and `ask`, and the host code behind them. Cards are drawn and tracked by the `slack-ui-kit` package.
 
 **`post_card`**
 
@@ -17,6 +17,15 @@ This skill adds two tools for agents, `post_card` and `ask`, and the host code b
 - A button press locks the card when an allowed person presses it. The card is redrawn without its controls and shows who submitted it and when.
 - Presses come back to the agent as `card_event` messages.
 - `post_card({ template, data, replaces })` posts an updated version of an earlier card of the same session. The new card keeps the old card's owner; once it has posted, the old card is closed with the note "Replaced by a newer version.". Pass the id of the most recent version. A `replaces` id that is unknown, from another session, an ask, another template, or an already locked card is ignored (warning logged) and the card posts normally with the usual owner. The old card is closed with its own instance's token, and a redelivered post finishes a close that was missed. A failure to close the old card is logged and never fails the post.
+
+**`update_card`**
+
+- The agent calls `update_card({ cardId, data })` to redraw a card its agent group posted earlier, in place (the same Slack message). The card keeps its template, owner and press rules. Use it for a card whose content changes over time, such as a status card, or a report a scheduled task refreshes.
+- The agent sends the full `data` each time. The host looks the template up again (so a template edit is picked up) and validates `data` the same way as `post_card`. Fields the template declares in `data` are replaced by what was sent, and a missing optional field falls back to the source's default. State the source owns (such as a `$choice` variable a control sets) is kept.
+- The card's press rules are replaced by the template's current ones; the owner stays. If a click is still being saved the update waits about a second, then fails with a "busy" notice.
+- A locked or closed card stays locked and keeps its locked look and footer; no live control comes back.
+- Any session of the same agent group can update the card, not only the one that posted it. A card of another group, or an `ask` card, cannot be updated.
+- The update uses the card's own Slack instance token. A failure arrives as a system message starting `update_card failed:`.
 
 **`ask`**
 
@@ -58,7 +67,7 @@ zod@4.6.7
 `slack-ui-kit` is not on npm. It installs from a GitHub release tag, pinned to that tag:
 
 ```nc:run effect:external
-pnpm add github:GokulramGHV/slack-ui-kit#v0.1.5
+pnpm add github:GokulramGHV/slack-ui-kit#v0.1.6
 ```
 
 The kit depends on `@openuidev/lang-core`, whose install script is telemetry. pnpm skips it, and it stays skipped: never add `@openuidev/lang-core` to `onlyBuiltDependencies` in `pnpm-workspace.yaml`. The module also sets `OPENUI_TELEMETRY_DISABLED=1` before the kit loads.
@@ -86,6 +95,8 @@ payload/src/modules/slack-ui/notify.test.ts -> src/modules/slack-ui/notify.test.
 payload/src/modules/slack-ui/notify.ts -> src/modules/slack-ui/notify.ts
 payload/src/modules/slack-ui/post-card.test.ts -> src/modules/slack-ui/post-card.test.ts
 payload/src/modules/slack-ui/post-card.ts -> src/modules/slack-ui/post-card.ts
+payload/src/modules/slack-ui/update-card.test.ts -> src/modules/slack-ui/update-card.test.ts
+payload/src/modules/slack-ui/update-card.ts -> src/modules/slack-ui/update-card.ts
 payload/src/modules/slack-ui/registration.test.ts -> src/modules/slack-ui/registration.test.ts
 payload/src/modules/slack-ui/slack-client.test.ts -> src/modules/slack-ui/slack-client.test.ts
 payload/src/modules/slack-ui/slack-client.ts -> src/modules/slack-ui/slack-client.ts
@@ -100,11 +111,15 @@ payload/container/agent-runner/src/mcp-tools/post-card-registration.test.ts -> c
 payload/container/agent-runner/src/mcp-tools/post-card.instructions.md -> container/agent-runner/src/mcp-tools/post-card.instructions.md
 payload/container/agent-runner/src/mcp-tools/post-card.test.ts -> container/agent-runner/src/mcp-tools/post-card.test.ts
 payload/container/agent-runner/src/mcp-tools/post-card.ts -> container/agent-runner/src/mcp-tools/post-card.ts
+payload/container/agent-runner/src/mcp-tools/update-card-registration.test.ts -> container/agent-runner/src/mcp-tools/update-card-registration.test.ts
+payload/container/agent-runner/src/mcp-tools/update-card.instructions.md -> container/agent-runner/src/mcp-tools/update-card.instructions.md
+payload/container/agent-runner/src/mcp-tools/update-card.test.ts -> container/agent-runner/src/mcp-tools/update-card.test.ts
+payload/container/agent-runner/src/mcp-tools/update-card.ts -> container/agent-runner/src/mcp-tools/update-card.ts
 ```
 
 ### Register the host module
 
-Add this line at the end of `src/modules/index.ts`. Importing the module creates the `ui_kit_cards` table, registers the click, form-submit and card-event handlers, and registers the `post_card` and `ask` delivery actions:
+Add this line at the end of `src/modules/index.ts`. Importing the module creates the `ui_kit_cards` table, registers the click, form-submit and card-event handlers, and registers the `post_card`, `update_card` and `ask` delivery actions:
 
 ```nc:append to:src/modules/index.ts
 import './slack-ui/index.js';
@@ -112,10 +127,11 @@ import './slack-ui/index.js';
 
 ### Register the agent tools
 
-Add these lines at the end of `container/agent-runner/src/mcp-tools/index.ts`. Imports run before the file's own code, so both tools are registered before the MCP server starts:
+Add these lines at the end of `container/agent-runner/src/mcp-tools/index.ts`. Imports run before the file's own code, so all three tools are registered before the MCP server starts:
 
 ```nc:append to:container/agent-runner/src/mcp-tools/index.ts
 import './post-card.js';
+import './update-card.js';
 import './ask.js';
 ```
 
@@ -141,10 +157,10 @@ Run the host tests and the container tests:
 
 ```nc:run effect:test
 pnpm exec vitest run src/modules/slack-ui
-cd container/agent-runner && bun test src/mcp-tools/post-card.test.ts src/mcp-tools/post-card-registration.test.ts src/mcp-tools/ask.test.ts src/mcp-tools/ask-registration.test.ts
+cd container/agent-runner && bun test src/mcp-tools/post-card.test.ts src/mcp-tools/post-card-registration.test.ts src/mcp-tools/update-card.test.ts src/mcp-tools/update-card-registration.test.ts src/mcp-tools/ask.test.ts src/mcp-tools/ask-registration.test.ts
 ```
 
-`registration.test.ts` imports the real modules barrel and fails if the `post_card` or `ask` action is not registered. `post-card-registration.test.ts` and `ask-registration.test.ts` fail if the MCP tools barrel does not import the tool.
+`registration.test.ts` imports the real modules barrel and fails if the `post_card`, `update_card` or `ask` action is not registered. `post-card-registration.test.ts`, `update-card-registration.test.ts` and `ask-registration.test.ts` fail if the MCP tools barrel does not import the tool.
 
 ## Writing a card template
 
