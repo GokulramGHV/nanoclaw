@@ -387,6 +387,10 @@ function createWhatsAppChannel(): ChannelAdapter {
 { "action": "reset_session", "payload": { "session_id": "sess-123", "reason": "Skills updated" } }
 ```
 
+## Access Grants
+
+`registerAccessGrant(fn)` in `src/router.ts` lets a module admit a sender on one wiring for one event: `fn(event, userId, mg, wiring)` returning true skips the access gate and the sender-scope gate for that wiring only. A grant can only admit, never deny; a throwing grant counts as no grant; with none registered the router is unchanged.
+
 ## Wake Context
 
 `src/wake-context.ts` lets a module add context to a session that an engaged message is waking, without editing the router. A module calls `registerWakeContext(name, provider)` at import, with a name unique among providers. The router calls `gatherWakeContext` once in the wake branch, after the cross-session backfill and before the message is written. With nothing registered it returns at once.

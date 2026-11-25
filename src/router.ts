@@ -133,6 +133,41 @@ export function registerMessageInterceptor(fn: MessageInterceptorFn): void {
 }
 
 /**
+ * Access-grant hook. A grant admits one sender on one wiring for one event: when any registered grant
+ * returns true, the access gate and sender-scope gate are skipped for that wiring only. A grant can only
+ * admit; it cannot deny, and it never sees a channel with no wiring (denied or unwired channels are
+ * handled before fan-out). A grant that throws counts as no grant. With none registered, nothing changes.
+ */
+export type AccessGrantFn = (
+  event: InboundEvent,
+  userId: string | null,
+  mg: MessagingGroup,
+  agent: MessagingGroupAgent,
+) => boolean | Promise<boolean>;
+
+const accessGrants: AccessGrantFn[] = [];
+
+export function registerAccessGrant(fn: AccessGrantFn): void {
+  accessGrants.push(fn);
+}
+
+async function isGranted(
+  event: InboundEvent,
+  userId: string | null,
+  mg: MessagingGroup,
+  agent: MessagingGroupAgent,
+): Promise<boolean> {
+  for (const grant of accessGrants) {
+    try {
+      if (await grant(event, userId, mg, agent)) return true;
+    } catch (err) {
+      log.error('Access grant threw, treated as no grant', { messagingGroupId: mg.id, err });
+    }
+  }
+  return false;
+}
+
+/**
  * Channel-registration hook. Runs when the router sees a mention/DM on a
  * messaging group that has no wirings AND hasn't been denied. The hook is
  * expected to escalate to an owner (card, etc.) and arrange for future
@@ -396,8 +431,11 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
 
     const engages = await evaluateEngage(agent, messageText, isMention, mg, effectiveThreadId);
 
-    const accessOk = engages && (!accessGate || (await accessGate(event, userId, mg, agent.agent_group_id)).allowed);
-    const scopeOk = engages && (!senderScopeGate || (await senderScopeGate(event, userId, mg, agent)).allowed);
+    const granted = engages && accessGrants.length > 0 && (await isGranted(event, userId, mg, agent));
+    const accessOk =
+      engages && (granted || !accessGate || (await accessGate(event, userId, mg, agent.agent_group_id)).allowed);
+    const scopeOk =
+      engages && (granted || !senderScopeGate || (await senderScopeGate(event, userId, mg, agent)).allowed);
 
     if (engages && accessOk && scopeOk) {
       await deliverToAgent(agent, agentGroup, mg, event, userId, threadsEnabled, effectiveThreadId, true);
