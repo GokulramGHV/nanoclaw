@@ -558,6 +558,27 @@ describe('tasks CLI resource', () => {
       expect(storedRoute(created.session_id, created.series_id)).toBeUndefined();
     });
 
+    it("a task created from a task run keeps the run's chat route", async () => {
+      seedInbound('chat-1', 'in-1', 2, 'slack', 'C1', '100.1');
+      const first = await create(agentCtx('ag-1', 'chat-1'), 'first');
+      const route = { channelType: 'slack', platformId: 'C1', threadId: '100.1' };
+      const second = await create(agentCtx('ag-1', first.session_id), 'second');
+      expect(second.origin_route).toEqual(route);
+      expect(storedRoute(second.session_id, second.series_id)).toEqual(route);
+    });
+
+    it('a task created from a task run that has no route still has none', async () => {
+      const first = await create(agentCtx('ag-1', 'chat-1'), 'bare');
+      const second = await create(agentCtx('ag-1', first.session_id), 'bare2');
+      expect(second.origin_route).toBeNull();
+    });
+
+    it('a chat session keeps its own newest route over anything else', async () => {
+      seedInbound('chat-1', 'in-1', 2, 'slack', 'C1', '100.1');
+      const created = await create(agentCtx('ag-1', 'chat-1'), 'plain');
+      expect(created.origin_route).toEqual({ channelType: 'slack', platformId: 'C1', threadId: '100.1' });
+    });
+
     it('stores none for a host CLI caller', async () => {
       seedInbound('chat-1', 'in-1', 2, 'slack', 'C1', '100.1');
       const created = await create({ caller: 'host' }, 'hosted', 'ag-1');

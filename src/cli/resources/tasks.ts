@@ -138,6 +138,22 @@ function taskId(args: Record<string, unknown>): string {
   return id;
 }
 
+/**
+ * The chat route a task created by this caller session replies to: the route of its newest chat
+ * message, or, in a scheduled task's own session (which holds no chat messages), that task's recorded
+ * route, so a task a run creates (a follow-up watch) keeps the chat of the task that made it.
+ */
+async function callerOriginRoute(agentGroupId: string, sessionId: string) {
+  const chat = await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => mailbox.getLatestChatRoute());
+  if (chat) return chat;
+  const session = await getSession(sessionId);
+  const threadId = session?.thread_id ?? null;
+  if (!threadId || !isTaskThread(threadId) || threadId === TASKS_SYSTEM_THREAD_ID) return null;
+  const seriesId = threadId.slice(TASKS_SYSTEM_THREAD_ID.length + 1);
+  const row = await withExistingMailboxSession(agentGroupId, sessionId, (mailbox) => mailbox.getTask(seriesId));
+  return row ? parseTaskContent(row.content).originRoute : null;
+}
+
 async function createTask(args: Record<string, unknown>, ctx: CallerContext) {
   const group = groupArg(args, ctx);
   if (!group) throw new Error('--group is required');
@@ -159,9 +175,7 @@ async function createTask(args: Record<string, unknown>, ctx: CallerContext) {
   // Only for the caller's own group: another group's task has no such chat.
   const originRoute =
     ctx.caller === 'agent' && ctx.agentGroupId === group
-      ? ((await withExistingMailboxSession(ctx.agentGroupId, ctx.sessionId, (mailbox) =>
-          mailbox.getLatestChatRoute(),
-        )) ?? null)
+      ? await callerOriginRoute(ctx.agentGroupId, ctx.sessionId)
       : null;
   const { session, row } = await createScheduledTask(group, prepared, {
     originSessionId: ctx.caller === 'agent' ? ctx.sessionId : null,
