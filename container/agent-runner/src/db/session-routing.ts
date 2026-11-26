@@ -47,13 +47,43 @@ export function resolveDestinationThread(
     return { threadId: replyingTo.threadId, inReplyTo: replyingTo.inReplyTo };
   }
   try {
-    return getAgentMailbox().operations.getLatestInboundRoute(channelType, platformId);
+    return (
+      getAgentMailbox().operations.getLatestInboundRoute(channelType, platformId) ??
+      taskOriginDestinationThread(channelType, platformId)
+    );
   } catch (err) {
     console.error(
       `[session-routing] resolveDestinationThread error: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
   return null;
+}
+
+/**
+ * Task rows carry no route of their own (they fire in an isolated session), so
+ * a task created from a chat thread records that route in its content. A send
+ * from a run of that task to the same channel lands in the recorded thread.
+ * Mirrors `parseTaskContent` on the host (no shared modules across the mount).
+ */
+function taskOriginDestinationThread(
+  channelType: string,
+  platformId: string,
+): { threadId: string | null; inReplyTo: null } | null {
+  const seriesId = getTaskSeriesId();
+  if (!seriesId) return null;
+  const raw = getAgentMailbox().operations.getTaskContent(seriesId);
+  if (!raw) return null;
+  let route: Record<string, unknown> | null = null;
+  try {
+    const origin = (JSON.parse(raw) as Record<string, unknown>).originRoute;
+    route = typeof origin === 'object' && origin !== null ? (origin as Record<string, unknown>) : null;
+    // eslint-disable-next-line no-catch-all/no-catch-all -- LEGACY-COMPAT(v1-tasks): plain-string content predating the JSON envelope
+  } catch {
+    return null;
+  }
+  if (!route || route.channelType !== channelType || route.platformId !== platformId) return null;
+  if (route.threadId !== null && route.threadId !== undefined && typeof route.threadId !== 'string') return null;
+  return { threadId: route.threadId ?? null, inReplyTo: null };
 }
 
 const TASK_THREAD_PREFIX = 'system:tasks:';

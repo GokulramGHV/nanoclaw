@@ -741,6 +741,8 @@ ncl tasks cancel <series_id>
 
 Implementation: the host writes `messages_in` task rows into the agent group's system session (`thread_id = system:tasks`). The host sweep wakes that system-session container when a task is due. The task agent chooses its destination at fire time by emitting `<message to="name">...</message>` or using `send_message`.
 
+A task created by an agent records the route of the chat message that agent was answering (`originRoute` in the task content: channel type, platform id, thread id). When a run sends to that same channel and no inbound route for it exists in the task session, the message lands in the recorded thread instead of the channel's top level. Tasks created from the host CLI, or for another agent group, record no route and post at the top level. The recorded route is the thread of the newest message that engaged the agent when the task was created, so in a shared session with two threads active at once (or a create held for approval and replayed later) it can be the other thread.
+
 #### create_agent
 
 Create a long-lived companion sub-agent. The `name` becomes a destination the creating

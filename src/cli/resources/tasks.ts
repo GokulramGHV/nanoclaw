@@ -118,6 +118,7 @@ function toOutput(session: ScopedSession, row: TaskRow) {
     prompt: content.prompt.length > 120 ? content.prompt.slice(0, 117) + '...' : content.prompt,
     has_script: content.script ? 1 : 0,
     origin_session_id: content.originSessionId, // which session created the task (null for CLI-created)
+    origin_route: content.originRoute, // chat route runs reply to (null for CLI-created)
     created_at: row.timestamp,
     tries: row.tries,
   };
@@ -153,8 +154,18 @@ async function createTask(args: Record<string, unknown>, ctx: CallerContext) {
     dangerouslyOverrideRecurrenceLimit: bool(args.dangerously_override_recurrence_limit),
     timezone: await resolveGroupTimezone(group),
   });
+  // The chat message the agent is answering when it runs this command names the
+  // thread the task's reports belong in; the agent never sees thread ids itself.
+  // Only for the caller's own group: another group's task has no such chat.
+  const originRoute =
+    ctx.caller === 'agent' && ctx.agentGroupId === group
+      ? ((await withExistingMailboxSession(ctx.agentGroupId, ctx.sessionId, (mailbox) =>
+          mailbox.getLatestChatRoute(),
+        )) ?? null)
+      : null;
   const { session, row } = await createScheduledTask(group, prepared, {
     originSessionId: ctx.caller === 'agent' ? ctx.sessionId : null,
+    originRoute,
   });
   return toOutput(session, row);
 }
@@ -251,6 +262,7 @@ async function getTask(args: Record<string, unknown>, ctx: CallerContext) {
         prompt: content.prompt,
         script: content.script,
         origin_session_id: content.originSessionId,
+        origin_route: content.originRoute,
         completed_runs: stats.runs,
         failed_runs: stats.failedRuns,
         series_key: seriesKey,

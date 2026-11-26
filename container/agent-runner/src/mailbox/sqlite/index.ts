@@ -180,6 +180,17 @@ export class SqliteAgentMailbox implements AgentMailbox {
     return row ? { threadId: row.thread_id, inReplyTo: row.id } : null;
   }
 
+  getTaskContent(seriesId: string): string | undefined {
+    return readInbound(
+      (db) =>
+        (
+          db
+            .prepare("SELECT content FROM messages_in WHERE kind = 'task' AND series_id = ? ORDER BY seq DESC LIMIT 1")
+            .get(seriesId) as { content: string } | undefined
+        )?.content,
+    );
+  }
+
   getUndeliveredMessages(): OutboundMessage[] {
     return sqliteGetUndeliveredMessages().map(outboundMessage);
   }
