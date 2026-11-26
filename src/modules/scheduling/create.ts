@@ -5,6 +5,7 @@ import { TIMEZONE } from '../../config.js';
 import type { TaskRecord } from '../../mailbox/index.js';
 import { resolveTaskSession, withMailboxSession } from '../../session-manager.js';
 import { parseZonedToUtc } from '../../timezone.js';
+import type { TaskOriginRoute } from './task-content.js';
 
 export const MAX_DAILY_FIRES = 4;
 
@@ -132,7 +133,7 @@ export function prepareScheduledTask(input: {
 export async function createScheduledTask(
   agentGroupId: string,
   task: PreparedScheduledTask,
-  options?: { status?: 'pending' | 'paused'; originSessionId?: string | null },
+  options?: { status?: 'pending' | 'paused'; originSessionId?: string | null; originRoute?: TaskOriginRoute | null },
 ): Promise<{ session: { id: string; agent_group_id: string }; row: ScheduledTaskRow }> {
   const id = makeTaskId(task.name);
   const { session } = await resolveTaskSession(agentGroupId, id);
@@ -147,6 +148,7 @@ export async function createScheduledTask(
         prompt: task.prompt,
         script: task.script,
         originSessionId: options?.originSessionId ?? null,
+        ...(options?.originRoute ? { originRoute: options.originRoute } : {}),
       }),
       status: options?.status ?? 'pending',
     });

@@ -486,6 +486,112 @@ describe('tasks CLI resource', () => {
     expect(content).toEqual({ prompt: 'daily digest', script: 'echo "{}"' });
   });
 
+  describe('origin route', () => {
+    function seedInbound(
+      session: string,
+      id: string,
+      seq: number,
+      channelType: string | null,
+      platformId: string | null,
+      threadId: string | null,
+    ): void {
+      const db = new Database(inboundDbPath('ag-1', session));
+      db.prepare(
+        `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content)
+         VALUES (?, ?, 'chat', ?, 'completed', ?, ?, ?, '{"text":"hi"}')`,
+      ).run(id, seq, now(), platformId, channelType, threadId);
+      db.close();
+    }
+
+    async function create(ctx: CallerContext, name: string, group?: string) {
+      const r = await dispatch(
+        {
+          id: `c-${name}`,
+          command: 'tasks-create',
+          args: { prompt: 'watch', name, process_after: '2999-01-01T00:00:00Z', ...(group ? { group } : {}) },
+        },
+        ctx,
+      );
+      expect(r.ok).toBe(true);
+      if (!r.ok) throw new Error('create failed');
+      return r.data as { series_id: string; session_id: string; origin_route: unknown };
+    }
+
+    function storedRoute(session: string, row: string): unknown {
+      const db = new Database(inboundDbPath('ag-1', session), { readonly: true });
+      const { content } = db.prepare('SELECT content FROM messages_in WHERE id = ?').get(row) as { content: string };
+      db.close();
+      return (JSON.parse(content) as Record<string, unknown>).originRoute;
+    }
+
+    it('an agent caller stores the route of its newest channel message', async () => {
+      seedInbound('chat-1', 'in-1', 2, 'slack', 'C1', '100.1');
+      seedInbound('chat-1', 'in-2', 4, 'slack', 'C1', '200.2');
+      seedInbound('chat-1', 'in-3', 6, 'agent', 'ag-9', null); // agent mail is not the chat being answered
+      const created = await create(agentCtx('ag-1', 'chat-1'), 'routed');
+      const route = { channelType: 'slack', platformId: 'C1', threadId: '200.2' };
+      expect(created.origin_route).toEqual(route);
+      expect(storedRoute(created.session_id, created.series_id)).toEqual(route);
+
+      const got = await dispatch({ id: 'g', command: 'tasks-get', args: { id: created.series_id } }, agentCtx());
+      expect(got.ok && (got.data as { origin_route: unknown }).origin_route).toEqual(route);
+    });
+
+    it('a message outside a thread stores a null thread', async () => {
+      seedInbound('chat-1', 'in-1', 2, 'telegram', 'tg:1', null);
+      const created = await create(agentCtx('ag-1', 'chat-1'), 'flat');
+      expect(created.origin_route).toEqual({ channelType: 'telegram', platformId: 'tg:1', threadId: null });
+    });
+
+    it('stores none when the origin session has no channel message', async () => {
+      const created = await create(agentCtx('ag-1', 'chat-1'), 'quiet');
+      expect(created.origin_route).toBeNull();
+      expect(storedRoute(created.session_id, created.series_id)).toBeUndefined();
+    });
+
+    it('stores none for a host CLI caller', async () => {
+      seedInbound('chat-1', 'in-1', 2, 'slack', 'C1', '100.1');
+      const created = await create({ caller: 'host' }, 'hosted', 'ag-1');
+      expect(created.origin_route).toBeNull();
+      expect(storedRoute(created.session_id, created.series_id)).toBeUndefined();
+    });
+
+    it('update and recurrence re-arming keep the route', async () => {
+      seedInbound('chat-1', 'in-1', 2, 'slack', 'C1', '100.1');
+      const r = await dispatch(
+        {
+          id: 'c-rec',
+          command: 'tasks-create',
+          args: { prompt: 'watch', name: 'rec', recurrence: '0 9 * * *' },
+        },
+        agentCtx('ag-1', 'chat-1'),
+      );
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const { series_id, session_id } = r.data as { series_id: string; session_id: string };
+      const route = { channelType: 'slack', platformId: 'C1', threadId: '100.1' };
+
+      const upd = await dispatch(
+        { id: 'u', command: 'tasks-update', args: { id: series_id, prompt: 'new prompt' } },
+        agentCtx('ag-1', 'chat-1'),
+      );
+      expect(upd.ok).toBe(true);
+      expect(storedRoute(session_id, series_id)).toEqual(route);
+
+      const session = (await getSession(session_id))!;
+      const db = new Database(inboundDbPath('ag-1', session_id));
+      db.prepare("UPDATE messages_in SET status = 'completed' WHERE id = ?").run(series_id);
+      db.close();
+      await withMailboxSession('ag-1', session_id, (mailbox) => handleRecurrence(mailbox, session));
+      const check = new Database(inboundDbPath('ag-1', session_id), { readonly: true });
+      const next = check
+        .prepare("SELECT content FROM messages_in WHERE series_id = ? AND status = 'pending'")
+        .get(series_id) as { content: string };
+      check.close();
+      expect(JSON.parse(next.content)).toMatchObject({ prompt: 'new prompt', originRoute: route });
+    });
+  });
+
   it('task object exposes origin_session_id and created_at', async () => {
     const r = await dispatch(
       {

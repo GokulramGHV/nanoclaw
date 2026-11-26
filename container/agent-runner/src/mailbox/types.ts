@@ -54,6 +54,8 @@ export interface MailboxOperations {
   getMessageIdBySeq(sequence: number): string | null;
   getRoutingBySeq(sequence: number): SessionRouting | null;
   getLatestInboundRoute(channelType: string, platformId: string): { threadId: string | null; inReplyTo: string } | null;
+  /** Content of the newest task row of a series in this session's inbound DB, or undefined when there is none. */
+  getTaskContent(seriesId: string): string | undefined;
   getUndeliveredMessages(): OutboundMessage[];
   /**
    * The host's delivery outcome for an outbound message, null until it has one.

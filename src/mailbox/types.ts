@@ -109,6 +109,8 @@ export interface InboundMailbox {
   markDelivered(messageOutId: string, platformMessageId: string | null): void;
   markDeliveryFailed(messageOutId: string): void;
   getInboundSourceSessionId(messageId: string): string | null;
+  /** Route of the newest chat message this session received from a channel, or null when none has arrived. */
+  getLatestChatRoute(): { channelType: string; platformId: string; threadId: string | null } | null;
   getMostRecentPeerSourceSessionId(peerAgentGroupId: string): string | null;
   /** True once another agent has messaged this session, answered or not. */
   hasMessagesFromOtherAgents(selfAgentGroupId: string): boolean;

@@ -216,6 +216,18 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
     markDelivered: (messageOutId, platformMessageId) => markDelivered(db, messageOutId, platformMessageId),
     markDeliveryFailed: (messageOutId) => markDeliveryFailed(db, messageOutId),
     getInboundSourceSessionId: (messageId) => getInboundSourceSessionId(db, messageId),
+    getLatestChatRoute: () => {
+      // Channel traffic only: 'agent' is agent-to-agent mail and 'session-echo' a mirrored send.
+      const row = db
+        .prepare(
+          `SELECT channel_type, platform_id, thread_id FROM messages_in
+           WHERE channel_type IS NOT NULL AND platform_id IS NOT NULL
+             AND channel_type NOT IN ('session-echo', 'agent')
+           ORDER BY seq DESC LIMIT 1`,
+        )
+        .get() as { channel_type: string; platform_id: string; thread_id: string | null } | undefined;
+      return row ? { channelType: row.channel_type, platformId: row.platform_id, threadId: row.thread_id } : null;
+    },
     getMostRecentPeerSourceSessionId: (peerAgentGroupId) => getMostRecentPeerSourceSessionId(db, peerAgentGroupId),
     hasMessagesFromOtherAgents: (selfAgentGroupId) =>
       db
