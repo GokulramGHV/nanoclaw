@@ -6,6 +6,8 @@
  * back later as card_event messages.
  */
 import { randomUUID } from 'node:crypto';
+import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { isAbsolute, sep } from 'node:path';
 
 import { writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting, resolveDestinationThread } from '../db/session-routing.js';
@@ -14,6 +16,47 @@ import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
 const MAX_TEMPLATE_LENGTH = 100;
+
+const DATA_FILE_MAX_BYTES = 256 * 1024;
+/** Root a `dataFile` must live under. NANOCLAW_DATA_FILE_ROOT replaces it (tests only). */
+const dataFileRoot = () => process.env.NANOCLAW_DATA_FILE_ROOT || '/workspace/agent';
+
+/**
+ * Read a card's data from a JSON file a script wrote. The path must be absolute
+ * and, after realpath (symlinks resolved), inside the root. Errors name the
+ * problem and never echo the file's contents.
+ */
+function readDataFile(path: string): { data: Record<string, unknown> } | { error: string } {
+  const outside = 'dataFile must be a file under /workspace/agent/';
+  if (!isAbsolute(path)) return { error: outside };
+  let real: string;
+  let root: string;
+  try {
+    root = realpathSync(dataFileRoot());
+    real = realpathSync(path);
+  } catch {
+    return { error: outside };
+  }
+  if (real !== root && !real.startsWith(root + sep)) return { error: outside };
+  let text: string;
+  try {
+    if (!statSync(real).isFile()) return { error: outside };
+    if (statSync(real).size > DATA_FILE_MAX_BYTES) return { error: 'dataFile is larger than 256 KB' };
+    text = readFileSync(real, 'utf8');
+  } catch {
+    return { error: 'dataFile could not be read' };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { error: 'dataFile is not valid JSON' };
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return { error: 'dataFile must hold a JSON object' };
+  }
+  return { data: parsed as Record<string, unknown> };
+}
 
 function log(msg: string): void {
   console.error(`[mcp-tools] ${msg}`);
@@ -45,7 +88,7 @@ export const postCard: McpToolDefinition = {
   tool: {
     name: 'post_card',
     description:
-      "Post a predefined interactive card from this agent group's card templates. Pass the template name and its data only; the layout and who can press each control come from the template. To post an updated version of a card you posted earlier, pass the id of the most recent version in `replaces`: the old card closes once the new one is posted.",
+      "Post a predefined interactive card from this agent group's card templates. Pass the template name and its data only (inline `data`, or `dataFile` when a script already wrote it, so nothing is retyped); the layout and who can press each control come from the template. To post an updated version of a card you posted earlier, pass the id of the most recent version in `replaces`: the old card closes once the new one is posted.",
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -54,6 +97,11 @@ export const postCard: McpToolDefinition = {
           type: 'object',
           description:
             "The template's data fields, exactly as its `data` section declares them (read /workspace/agent/plugins/<plugin>/cards/<template>.json). Defaults to {}.",
+        },
+        dataFile: {
+          type: 'string',
+          description:
+            'Optional, instead of data. Absolute path of a JSON file under /workspace/agent/ that a script wrote with exactly the template\'s data fields (an object, up to 256 KB). Prefer it whenever a script already wrote the data, so nothing is retyped.',
         },
         replaces: {
           type: 'string',
@@ -70,7 +118,14 @@ export const postCard: McpToolDefinition = {
     const template = rawTemplate.trim();
     if (template.length > MAX_TEMPLATE_LENGTH) return err(`template must be at most ${MAX_TEMPLATE_LENGTH} characters`);
 
-    const data = args.data === undefined ? {} : args.data;
+    let data: unknown = args.data === undefined ? {} : args.data;
+    if (args.dataFile !== undefined) {
+      if (args.data !== undefined) return err('give either data or dataFile, not both');
+      if (typeof args.dataFile !== 'string' || !args.dataFile) return err('dataFile must be a file under /workspace/agent/');
+      const read = readDataFile(args.dataFile);
+      if ('error' in read) return err(read.error);
+      data = read.data;
+    }
     if (typeof data !== 'object' || data === null || Array.isArray(data)) return err('data must be an object');
 
     const rawReplaces = args.replaces;

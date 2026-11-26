@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { mkdtempSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { closeSessionDb, initTestSessionDb } from '../mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';
@@ -47,6 +50,67 @@ describe('update_card', () => {
       const result = await updateCard.handler(args as Record<string, unknown>);
       expect(result.isError).toBe(true);
     }
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+});
+
+describe('update_card dataFile', () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'uc-root-')));
+  const outsideDir = realpathSync(mkdtempSync(join(tmpdir(), 'uc-out-')));
+  const prev = process.env.NANOCLAW_DATA_FILE_ROOT;
+  beforeEach(() => {
+    process.env.NANOCLAW_DATA_FILE_ROOT = root;
+  });
+  afterEach(() => {
+    if (prev === undefined) delete process.env.NANOCLAW_DATA_FILE_ROOT;
+    else process.env.NANOCLAW_DATA_FILE_ROOT = prev;
+  });
+  const write = (dir: string, name: string, text: string) => {
+    const p = join(dir, name);
+    writeFileSync(p, text);
+    return p;
+  };
+
+  it('sends the file contents inline as data', async () => {
+    const f = write(root, 'ok.json', JSON.stringify({ title: 'From file', n: 2 }));
+    const result = await updateCard.handler({ cardId: 'c1', dataFile: f });
+    expect(result.isError).not.toBe(true);
+    expect(JSON.parse(getUndeliveredMessages()[0].content).data).toEqual({ title: 'From file', n: 2 });
+  });
+
+  it('refuses data and dataFile together', async () => {
+    const f = write(root, 'ok.json', '{}');
+    const result = await updateCard.handler({ cardId: 'c1', data: {}, dataFile: f });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('not both');
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('refuses a file outside the root, a relative path, and a symlink that escapes it', async () => {
+    const out = write(outsideDir, 'x.json', '{"secret":"s3cr3t"}');
+    symlinkSync(out, join(root, 'link.json'));
+    for (const p of [out, join(root, 'link.json'), 'ok.json', join(root, 'missing.json'), root]) {
+      const result = await updateCard.handler({ cardId: 'c1', dataFile: p });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toBe('Error: dataFile must be a file under /workspace/agent/');
+    }
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
+
+  it('refuses a file over 256 KB, bad JSON and an array, without echoing contents', async () => {
+    const big = write(root, 'big.json', JSON.stringify({ a: 'x'.repeat(256 * 1024) }));
+    const bad = write(root, 'bad.json', '{"secret": nope');
+    const arr = write(root, 'arr.json', '[1,2]');
+    const texts: string[] = [];
+    for (const f of [big, bad, arr]) {
+      const result = await updateCard.handler({ cardId: 'c1', dataFile: f });
+      expect(result.isError).toBe(true);
+      texts.push(result.content[0].text);
+    }
+    expect(texts[0]).toContain('256 KB');
+    expect(texts[1]).toContain('not valid JSON');
+    expect(texts[2]).toContain('JSON object');
+    expect(texts.join('')).not.toContain('secret');
     expect(getUndeliveredMessages()).toHaveLength(0);
   });
 });
