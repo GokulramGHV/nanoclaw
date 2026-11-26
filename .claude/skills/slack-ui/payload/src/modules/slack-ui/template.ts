@@ -142,10 +142,26 @@ function isRule(v: unknown): v is Rule {
   if (keys[0] === 'users') {
     return Array.isArray(v.users) && v.users.length > 0 && v.users.every((u) => typeof u === 'string' && u.length > 0);
   }
+  if (keys[0] === 'stateUser') return typeof v.stateUser === 'string' && v.stateUser.length > 0;
   return false;
 }
 
-const RULE_HELP = '"owner", "anyone", {"group": "<id>"} or {"users": ["<id>", ...]}';
+const RULE_HELP = '"owner", "anyone", {"group": "<id>"}, {"users": ["<id>", ...]} or {"stateUser": "<data field>"}';
+const SLACK_USER_ID_RE = /^[UW][A-Z0-9]{2,}$/;
+
+/** Data fields named by `stateUser` rules: the one person who may act is the Slack user id in that field. */
+export function stateUserFields(access: Access | undefined): string[] {
+  if (!access) return [];
+  const rules: unknown[] = [
+    ...ACCESS_RULE_KEYS.map((k) => (access as Record<string, unknown>)[k]),
+    ...Object.values((access as { byId?: Record<string, unknown> }).byId ?? {}),
+  ];
+  const out: string[] = [];
+  for (const r of rules) {
+    if (isObj(r) && typeof r.stateUser === 'string' && !out.includes(r.stateUser)) out.push(r.stateUser);
+  }
+  return out;
+}
 const ACCESS_RULE_KEYS = ['default', 'buttons', 'inputs', 'feedback', 'forms'] as const;
 
 function checkAccess(access: unknown, problems: string[]): void {
@@ -194,7 +210,17 @@ export function parseTemplate(json: string, name: string): CardTemplate {
   const problems: string[] = [];
   if (raw.version !== 2) problems.push('version must be 2');
   checkFieldSpecs(raw.data ?? {}, 'data', problems);
-  if (raw.access !== undefined) checkAccess(raw.access, problems);
+  if (raw.access !== undefined) {
+    checkAccess(raw.access, problems);
+    if (isObj(raw.access)) {
+      for (const field of stateUserFields(raw.access as Access)) {
+        const spec = isObj(raw.data) ? raw.data[field] : undefined;
+        if (!isObj(spec) || spec.type !== 'string') {
+          problems.push(`access stateUser "${field}" must name a string field in data`);
+        }
+      }
+    }
+  }
   if (typeof raw.openui !== 'string' || !OPENUI_FILE_RE.test(raw.openui)) {
     problems.push('openui must be the plain file name of a .oui file beside the template (no folders)');
   }
@@ -343,6 +369,12 @@ function validateObject(specs: Record<string, FieldSpec>, value: unknown, where:
 export function validateData(t: CardTemplate, data: unknown): Record<string, unknown> {
   const problems: string[] = [];
   const out = validateObject(t.data, data ?? {}, '', problems);
+  for (const field of stateUserFields(t.access)) {
+    const v = out[field];
+    if (v !== undefined && (typeof v !== 'string' || !SLACK_USER_ID_RE.test(v))) {
+      problems.push(`field "${field}" must be a Slack user id like U012AB3CD (it decides who may act on the card)`);
+    }
+  }
   if (problems.length > 0) throw new TemplateError(problems);
   return out;
 }

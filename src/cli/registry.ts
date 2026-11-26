@@ -19,6 +19,15 @@ import type { CallerContext } from './frame.js';
  */
 export const GROUP_SCOPE_RESOURCES = new Set(['groups', 'sessions', 'destinations', 'members', 'tasks', 'templates']);
 
+/**
+ * Lets a module allow one of its own resources at group scope. Call it at
+ * import time, before the CLI server starts; the guard and `ncl help` read
+ * the same set, so they stay in agreement.
+ */
+export function allowAtGroupScope(plural: string): void {
+  GROUP_SCOPE_RESOURCES.add(plural);
+}
+
 export type Access = 'open' | 'approval' | 'hidden';
 
 export type CommandDef<TArgs = unknown, TData = unknown> = {
