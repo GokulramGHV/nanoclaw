@@ -308,7 +308,7 @@ A template with `version: 1`, or no version, is the old JSON block format. `post
 
 ## Looking up a Slack user by email
 
-`ncl slack-users lookup --email <addr>` turns a work email into a Slack user id, so an agent can mention a person or name them on a card. The host makes the call with the bot token of the Slack app the agent's chat runs on; the agent never sees a token. It returns `{ id, name, real_name }` for an active person and nothing else (no email, profile, phone or title). A missing, deactivated, bot or app user answers "no active Slack user with that email".
+`ncl slack-users lookup --email <addr>` turns a work email into a Slack user id, so an agent can mention a person or name them on a card. The host makes the call with the bot token of the Slack app the agent's chat runs on; the agent never sees a token. It returns `{ id, name, real_name }` for an active person and nothing else (no email, profile, phone or title). A missing, deactivated, bot or app user answers "no active Slack user with that email". In an `agent-shared` session the app is the one of the chat the session was created for, which may not be the chat it is answering.
 
 - The Slack app needs the `users:read` and `users:read.email` scopes. Without `users:read.email` the command says so.
 - It is read only, needs no approval, and is allowed at `cli_scope=group`. It works only from a Slack chat. From the host, pass `--instance <name>` (for example `slack`).

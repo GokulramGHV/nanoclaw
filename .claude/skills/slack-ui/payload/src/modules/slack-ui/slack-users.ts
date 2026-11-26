@@ -97,9 +97,10 @@ export async function lookupSlackUser(
   ) {
     throw new Error(NOT_FOUND);
   }
-  const realName = typeof user.real_name === 'string' ? user.real_name : '';
-  const display = typeof user.profile?.display_name === 'string' ? user.profile.display_name : '';
-  return { id: user.id, name: display || realName, real_name: realName };
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+  const realName = str(user.real_name) || str(user.profile?.real_name);
+  const display = str(user.profile?.display_name);
+  return { id: user.id, name: display || realName || str(user.name), real_name: realName };
 }
 
 registerResource({
@@ -125,7 +126,7 @@ registerResource({
       handler: (args, ctx) => lookupSlackUser(args, ctx as { caller: string; messagingGroupId?: string }),
       formatHuman: (data) => {
         const u = data as SlackUserMatch;
-        return `${u.id} ${u.name}`;
+        return `${u.id} ${u.name}${u.real_name && u.real_name !== u.name ? ` (${u.real_name})` : ''}`;
       },
     },
   },
