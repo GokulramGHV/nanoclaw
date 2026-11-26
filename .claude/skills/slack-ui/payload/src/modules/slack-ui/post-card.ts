@@ -10,7 +10,7 @@ import path from 'node:path';
 
 import Database from 'better-sqlite3';
 
-import { CardRenderError, type CardRecord } from 'slack-ui-kit';
+import { CardRenderError, type CardRecord, type SlackClient } from 'slack-ui-kit';
 
 import { botTokenKeyForInstance } from '../../channels/slack-lib.js';
 import { registerDeliveryAction } from '../../delivery.js';
@@ -243,6 +243,15 @@ export function shortMessage(err: unknown): string {
     .slice(0, 200);
 }
 
+/** The same client, but every chat.postMessage also goes to the channel (`reply_broadcast: true`). */
+function withReplyBroadcast(client: SlackClient): SlackClient {
+  const chat = client.chat;
+  return {
+    ...client,
+    chat: { ...chat, postMessage: (args) => chat.postMessage({ ...args, reply_broadcast: true }) },
+  } as SlackClient;
+}
+
 async function postCard(content: Record<string, unknown>, session: Session): Promise<void> {
   const { cardId, template: templateName } = content;
   if (typeof cardId !== 'string' || !CARD_ID_RE.test(cardId)) throw new PostCardError('invalid cardId');
@@ -294,7 +303,10 @@ async function postCard(content: Record<string, unknown>, session: Session): Pro
     throw new PostCardError(`template ${templateName} could not be rendered: ${shortMessage(err)}`);
   }
   const client = slackClientForToken(token);
-  await kit.postCard(client, { channel, ...(threadTs ? { threadTs } : {}) }, template.source, {
+  // `alsoToChannel`: a card posted as a thread reply also shows in the channel (Slack's
+  // reply_broadcast). It is one message, so later updates show in both places. Outside a thread it is ignored.
+  const postClient = content.alsoToChannel === true && threadTs ? withReplyBroadcast(client) : client;
+  await kit.postCard(postClient, { channel, ...(threadTs ? { threadTs } : {}) }, template.source, {
     owner,
     access: template.access,
     trusted: true,

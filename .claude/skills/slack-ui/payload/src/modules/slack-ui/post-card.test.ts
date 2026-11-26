@@ -395,6 +395,20 @@ sel = MultiSelect("labels", $labels, [Option("adhoc", "adhoc"), Option("backlog"
     expect(posts()[0]!.args).toMatchObject({ thread_ts: '1698.5' });
   });
 
+  it('alsoToChannel posts a thread reply with reply_broadcast', async () => {
+    await post({ threadId: 'slack:C123:1699999999.000100', alsoToChannel: true });
+    expect(posts()[0]!.args).toMatchObject({ thread_ts: '1699999999.000100', reply_broadcast: true });
+    expect((await getCardById('card-1'))?.threadTs).toBe('1699999999.000100');
+  });
+
+  it('alsoToChannel is ignored outside a thread, and off by default', async () => {
+    await post({ threadId: 'bogus', alsoToChannel: true });
+    expect(posts()[0]!.args).not.toHaveProperty('reply_broadcast');
+    fake.calls.length = 0;
+    await post({ cardId: 'card-2', threadId: 'slack:C123:1699999999.000100' });
+    expect(posts()[0]!.args).not.toHaveProperty('reply_broadcast');
+  });
+
   it('goes top-level when neither thread matches', async () => {
     await post({ threadId: 'bogus' }, { ...session, thread_id: 'slack:C999:1.1' });
     expect(posts()[0]!.args).not.toHaveProperty('thread_ts');

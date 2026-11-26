@@ -68,6 +68,16 @@ describe('post_card', () => {
     expect(result.isError).toBe(true);
     expect(getUndeliveredMessages()).toHaveLength(1);
   });
+
+  it('passes alsoToChannel through only when it is true', async () => {
+    await postCard.handler({ template: 'demo-request', alsoToChannel: true });
+    await postCard.handler({ template: 'demo-request', alsoToChannel: 'yes' });
+    await postCard.handler({ template: 'demo-request' });
+    const sent = getUndeliveredMessages().map((m) => JSON.parse(m.content));
+    expect(sent[0].alsoToChannel).toBe(true);
+    expect('alsoToChannel' in sent[1]).toBe(false);
+    expect('alsoToChannel' in sent[2]).toBe(false);
+  });
 });
 
 describe('post_card dataFile', () => {

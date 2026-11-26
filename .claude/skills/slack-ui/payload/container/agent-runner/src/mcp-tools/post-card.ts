@@ -110,6 +110,11 @@ export const postCard: McpToolDefinition = {
           description:
             'Optional, instead of data. Absolute path of a JSON file under /workspace/agent/ that a script wrote with exactly the template\'s data fields (an object, up to 256 KB). Prefer it whenever a script already wrote the data, so nothing is retyped.',
         },
+        alsoToChannel: {
+          type: 'boolean',
+          description:
+            'Optional, only on Slack: when the card is a reply in a thread, also show it in the channel. It stays one message, so update_card changes it in both places. Ignored outside a thread.',
+        },
         replaces: {
           type: 'string',
           description:
@@ -150,6 +155,7 @@ export const postCard: McpToolDefinition = {
         template,
         data,
         ...(replaces ? { replaces } : {}),
+        ...(args.alsoToChannel === true ? { alsoToChannel: true } : {}),
         threadId: routing().thread_id,
         inReplyTo: getCurrentInReplyTo(),
       }),

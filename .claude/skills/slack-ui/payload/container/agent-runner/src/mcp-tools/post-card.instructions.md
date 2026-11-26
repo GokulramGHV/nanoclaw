@@ -6,6 +6,7 @@
 - When a script already wrote the card's data to a file, pass `dataFile` (an absolute path under `/workspace/agent/`) instead of `data`, so nothing is retyped. Give `data` or `dataFile`, never both.
 - Pass the template name and its data only. The layout and who may press each control come from the template; you cannot change them.
 - The person you are answering becomes the card's owner.
+- On Slack, `alsoToChannel: true` makes a card posted as a thread reply show in the channel too. It is still one message, so `update_card` changes it in both places. Use it only for a card the whole channel should follow, such as a status that changes over time.
 - To post an updated version of a card, pass the id of the most recent version (from the post result or its `card_event`) as `replaces`. The old card closes and only the newest can be pressed.
 - To mention or name a person you only know by email, get their Slack user id with `ncl slack-users lookup --email <addr>` (when `ncl` is available to you); it returns `id`, `name` and `real_name`.
 - Never retype numbers that came from a tool. Pass them through in `data` exactly as the tool returned them.
