@@ -67,7 +67,7 @@ zod@4.6.7
 `slack-ui-kit` is not on npm. It installs from a GitHub release tag, pinned to that tag:
 
 ```nc:run effect:external
-pnpm add github:GokulramGHV/slack-ui-kit#v0.1.6
+pnpm add github:GokulramGHV/slack-ui-kit#v0.1.7
 ```
 
 The kit depends on `@openuidev/lang-core`, whose install script is telemetry. pnpm skips it, and it stays skipped: never add `@openuidev/lang-core` to `onlyBuiltDependencies` in `pnpm-workspace.yaml`. The module also sets `OPENUI_TELEMETRY_DISABLED=1` before the kit loads.
@@ -230,7 +230,7 @@ Two ready-made examples, one with a user-group rule, are in this skill's `exampl
 - `byId`: a rule for one control, keyed by its statement name, for example `{ "ack": { "group": "S0EXAMPLE" } }`. A key that matches no statement does nothing.
 - `lock`: `"buttons"` (default), `"never"` or `{ "ids": ["create"] }`.
 
-A rule is `"owner"`, `"anyone"`, `{ "group": "<Slack user group id>" }` or `{ "users": ["U0EXAMPLE", "U0EXAMPLE2"] }`. A refused press gets a private note, no event and no lock. A refused input change also puts the control back on the clicker's screen.
+A rule is `"owner"`, `"anyone"`, `{ "group": "<Slack user group id>" }`, `{ "users": ["U0EXAMPLE", "U0EXAMPLE2"] }` or `{ "stateUser": "<data field>" }`. `stateUser` lets only the Slack user whose id the agent put in that data field act, for a card meant for one person who is known only when it is posted. The field must be a `string` in `data`, and `post_card` and `update_card` refuse a value that is not a Slack user id. Never bind that field to an input on the card. A refused press gets a private note, no event and no lock. A refused input change also puts the control back on the clicker's screen.
 
 A group rule looks members up with `usergroups.users.list` (cached for 60 seconds). If the lookup fails or takes more than 1.5 seconds, the press is denied.
 

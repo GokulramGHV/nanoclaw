@@ -222,6 +222,25 @@ describe('parseTemplate', () => {
       expect(parse({ lock: 'always' })).toThrow(/access\.lock must be/);
       expect(parse({ lock: { ids: [1] } })).toThrow(/access\.lock must be/);
     });
+
+    it('accepts a stateUser rule that names a string data field, and rejects one that does not', () => {
+      const withData = (data: unknown, access: unknown) => () =>
+        parseTemplate(JSON.stringify({ ...good, data, access }), 'x');
+      expect(withData({ assignee: { type: 'string' } }, { byId: { done: { stateUser: 'assignee' } } })).not.toThrow();
+      expect(withData({ assignee: { type: 'string' } }, { buttons: { stateUser: 'assignee' } })).not.toThrow();
+      expect(withData({}, { byId: { done: { stateUser: 'assignee' } } })).toThrow(
+        /access stateUser "assignee" must name a string field in data/,
+      );
+      expect(withData({ assignee: { type: 'number' } }, { buttons: { stateUser: 'assignee' } })).toThrow(
+        /must name a string field/,
+      );
+      expect(withData({ assignee: { type: 'string' } }, { buttons: { stateUser: '' } })).toThrow(
+        /access\.buttons must be/,
+      );
+      expect(withData({ assignee: { type: 'string' } }, { buttons: { stateUser: 1 } })).toThrow(
+        /access\.buttons must be/,
+      );
+    });
   });
 });
 
@@ -358,5 +377,30 @@ describe('findTemplate', () => {
     expect(err).toBeInstanceOf(TemplateError);
     expect(err.message).not.toContain(dir);
     expect(err.cause).toBeInstanceOf(Error);
+  });
+});
+
+describe('validateData with a stateUser rule', () => {
+  const t = tpl({
+    data: { assignee: { type: 'string' }, note: { type: 'string' } },
+    access: { byId: { done: { stateUser: 'assignee' } } },
+  });
+
+  it('accepts a Slack user id, or the field left out', () => {
+    expect(validateData(t, { assignee: 'U012AB3CD' })).toEqual({ assignee: 'U012AB3CD' });
+    expect(validateData(t, { assignee: 'W012AB3CD' })).toEqual({ assignee: 'W012AB3CD' });
+    expect(validateData(t, { note: 'x' })).toEqual({ note: 'x' });
+  });
+
+  it('refuses anything else in that field', () => {
+    for (const bad of ['', 'someone', '<@U012AB3CD>', 'u012ab3cd', 'S012AB3CD', 'U1']) {
+      expect(() => validateData(t, { assignee: bad })).toThrow(/field "assignee" must be a Slack user id/);
+    }
+  });
+
+  it('leaves templates without stateUser alone', () => {
+    expect(validateData(tpl({ data: { assignee: { type: 'string' } } }), { assignee: 'anyone' })).toEqual({
+      assignee: 'anyone',
+    });
   });
 });
