@@ -106,6 +106,19 @@ afterEach(() => {
   closeSessionDb();
 });
 
+describe('send_message alsoToChannel', () => {
+  it('carries the flag into the outbound content only when true', async () => {
+    await sendMessage.handler({ to: 'peer', text: 'a', alsoToChannel: true });
+    await sendMessage.handler({ to: 'peer', text: 'b', alsoToChannel: false });
+    await sendMessage.handler({ to: 'peer', text: 'c' });
+    expect(getUndeliveredMessages().map((m) => JSON.parse(m.content))).toEqual([
+      { text: 'a', alsoToChannel: true },
+      { text: 'b' },
+      { text: 'c' },
+    ]);
+  });
+});
+
 describe('send_message MCP tool — in_reply_to plumbing', () => {
   it('stamps the batch in_reply_to (published via the DB) on outbound rows', async () => {
     publishInReplyTo('inbound-msg-1');

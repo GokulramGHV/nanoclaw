@@ -35,6 +35,7 @@ import { cardProblems, isCardPart, isRecord, type CardPart } from './card-parts.
 import { CardTooLongError, cardQuestionTooLong, normalizeOptions, type NormalizedOption } from './ask-question.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, HistoryLine, InboundMessage } from './adapter.js';
 import { INSTANCE_KEY_RE } from './channel-registry.js';
+import { broadcastScope, installReplyBroadcast } from './reply-broadcast.js';
 import { resolveQuestionRender, dispatchQuestionAction, dispatchModalSubmit } from './question-render-registry.js';
 
 /** Adapter with optional gateway support (e.g., Discord). */
@@ -1363,10 +1364,17 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         for (let i = resumed?.posted ?? 0; i < chunks.length; i++) {
           const chunk = chunks[i];
           const attachFiles = i === 0 && fileUploads && fileUploads.length > 0;
-          const result = await adapter.postMessage(
-            tid,
-            attachFiles ? { markdown: chunk, files: fileUploads } : { markdown: chunk },
-          );
+          const post = () =>
+            adapter.postMessage(tid, attachFiles ? { markdown: chunk, files: fileUploads } : { markdown: chunk });
+          // `alsoToChannel` (a thread reply that also goes to the channel) applies to the first part only,
+          // and only on Slack; elsewhere, and outside a thread, it is ignored.
+          let result;
+          if (i === 0 && content.alsoToChannel === true && adapter.name === 'slack') {
+            installReplyBroadcast(adapter);
+            result = await broadcastScope.run({ broadcast: true }, post);
+          } else {
+            result = await post();
+          }
           if (i === 0) firstId = result?.id;
           await progress?.save(i + 1, firstId);
         }

@@ -75,6 +75,11 @@ export const sendMessage: McpToolDefinition = {
           description: 'Destination name (e.g., "family", "worker-1").',
         },
         text: { type: 'string', description: 'Message content' },
+        alsoToChannel: {
+          type: 'boolean',
+          description:
+            'Only on Slack: when this message is a reply in a thread, also post it to the channel. Ignored everywhere else.',
+        },
       },
       required: ['to', 'text'],
     },
@@ -96,7 +101,7 @@ export const sendMessage: McpToolDefinition = {
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
       thread_id: routing.thread_id,
-      content: JSON.stringify({ text }),
+      content: JSON.stringify(args.alsoToChannel === true ? { text, alsoToChannel: true } : { text }),
     });
 
     log(`send_message: #${seq} → ${routing.resolvedName}`);
