@@ -217,16 +217,21 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
     markDeliveryFailed: (messageOutId) => markDeliveryFailed(db, messageOutId),
     getInboundSourceSessionId: (messageId) => getInboundSourceSessionId(db, messageId),
     getLatestChatRoute: () => {
-      // Channel traffic only: 'agent' is agent-to-agent mail and 'session-echo' a mirrored send.
+      // The newest message that engaged the agent (trigger = 1 chat), mirrored sends excluded.
+      // Agent-to-agent mail stays in the pool: when it is the newest, the agent was answering
+      // a peer, not a chat, so there is no route (never skip back to an older chat row).
       const row = db
         .prepare(
           `SELECT channel_type, platform_id, thread_id FROM messages_in
-           WHERE channel_type IS NOT NULL AND platform_id IS NOT NULL
-             AND channel_type NOT IN ('session-echo', 'agent')
+           WHERE kind IN ('chat','chat-sdk') AND trigger = 1
+             AND channel_type IS NOT NULL AND platform_id IS NOT NULL
+             AND channel_type != 'session-echo'
            ORDER BY seq DESC LIMIT 1`,
         )
         .get() as { channel_type: string; platform_id: string; thread_id: string | null } | undefined;
-      return row ? { channelType: row.channel_type, platformId: row.platform_id, threadId: row.thread_id } : null;
+      return row && row.channel_type !== 'agent'
+        ? { channelType: row.channel_type, platformId: row.platform_id, threadId: row.thread_id }
+        : null;
     },
     getMostRecentPeerSourceSessionId: (peerAgentGroupId) => getMostRecentPeerSourceSessionId(db, peerAgentGroupId),
     hasMessagesFromOtherAgents: (selfAgentGroupId) =>

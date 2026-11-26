@@ -156,8 +156,9 @@ async function createTask(args: Record<string, unknown>, ctx: CallerContext) {
   });
   // The chat message the agent is answering when it runs this command names the
   // thread the task's reports belong in; the agent never sees thread ids itself.
+  // Only for the caller's own group: another group's task has no such chat.
   const originRoute =
-    ctx.caller === 'agent'
+    ctx.caller === 'agent' && ctx.agentGroupId === group
       ? ((await withExistingMailboxSession(ctx.agentGroupId, ctx.sessionId, (mailbox) =>
           mailbox.getLatestChatRoute(),
         )) ?? null)

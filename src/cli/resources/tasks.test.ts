@@ -494,12 +494,13 @@ describe('tasks CLI resource', () => {
       channelType: string | null,
       platformId: string | null,
       threadId: string | null,
+      trigger = 1,
     ): void {
       const db = new Database(inboundDbPath('ag-1', session));
       db.prepare(
-        `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content)
-         VALUES (?, ?, 'chat', ?, 'completed', ?, ?, ?, '{"text":"hi"}')`,
-      ).run(id, seq, now(), platformId, channelType, threadId);
+        `INSERT INTO messages_in (id, seq, kind, timestamp, status, "trigger", platform_id, channel_type, thread_id, content)
+         VALUES (?, ?, 'chat', ?, 'completed', ?, ?, ?, ?, '{"text":"hi"}')`,
+      ).run(id, seq, now(), trigger, platformId, channelType, threadId);
       db.close();
     }
 
@@ -527,7 +528,8 @@ describe('tasks CLI resource', () => {
     it('an agent caller stores the route of its newest channel message', async () => {
       seedInbound('chat-1', 'in-1', 2, 'slack', 'C1', '100.1');
       seedInbound('chat-1', 'in-2', 4, 'slack', 'C1', '200.2');
-      seedInbound('chat-1', 'in-3', 6, 'agent', 'ag-9', null); // agent mail is not the chat being answered
+      seedInbound('chat-1', 'in-3', 6, 'slack', 'C1', '300.3', 0); // not engaged: ignored
+      seedInbound('chat-1', 'in-4', 8, 'session-echo', 'C1', '400.4'); // mirrored send: ignored
       const created = await create(agentCtx('ag-1', 'chat-1'), 'routed');
       const route = { channelType: 'slack', platformId: 'C1', threadId: '200.2' };
       expect(created.origin_route).toEqual(route);
@@ -535,6 +537,13 @@ describe('tasks CLI resource', () => {
 
       const got = await dispatch({ id: 'g', command: 'tasks-get', args: { id: created.series_id } }, agentCtx());
       expect(got.ok && (got.data as { origin_route: unknown }).origin_route).toEqual(route);
+    });
+
+    it('agent mail newer than a chat row gives no route', async () => {
+      seedInbound('chat-1', 'in-1', 2, 'slack', 'C1', '100.1');
+      seedInbound('chat-1', 'in-2', 4, 'agent', 'ag-9', null);
+      const created = await create(agentCtx('ag-1', 'chat-1'), 'peer');
+      expect(created.origin_route).toBeNull();
     });
 
     it('a message outside a thread stores a null thread', async () => {
