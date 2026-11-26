@@ -15,14 +15,14 @@ import { CardRenderError, type CardRecord } from 'slack-ui-kit';
 import { botTokenKeyForInstance } from '../../channels/slack-lib.js';
 import { registerDeliveryAction } from '../../delivery.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
-import { getMessagingGroup } from '../../db/messaging-groups.js';
+import { getMessagingGroup, getMessagingGroupsByAgentGroup } from '../../db/messaging-groups.js';
 import { envValue } from '../../env.js';
 import { unguarded } from '../../guard/types.js';
 import { resolveGroupFolderPath } from '../../group-folder.js';
 import { log } from '../../log.js';
 import { pauseTypingRefreshAfterDelivery } from '../typing/index.js';
 import { sessionDir } from '../../session-manager.js';
-import type { Session } from '../../types.js';
+import type { MessagingGroup, Session } from '../../types.js';
 import { getCardById } from './db/kit-cards.js';
 import { kit } from './kit.js';
 import { notifyCardFailure } from './notify.js';
@@ -173,6 +173,67 @@ function senderFor(db: Database.Database, messageId: string, hops: number): stri
   return null;
 }
 
+const TASK_THREAD_PREFIX = 'system:tasks:';
+
+/**
+ * The chat route a scheduled task was created from, read from the task row in
+ * the host's own copy of the session's inbound.db (never from anything the
+ * container sends). Null when the session is not a task session, the row is
+ * gone, or the task recorded no route. Never throws.
+ */
+export function readTaskOriginRoute(
+  session: Session,
+): { channelType: string; platformId: string; threadId: string | null } | null {
+  if (!session.thread_id?.startsWith(TASK_THREAD_PREFIX)) return null;
+  const seriesId = session.thread_id.slice(TASK_THREAD_PREFIX.length);
+  let db: Database.Database | undefined;
+  try {
+    db = new Database(path.join(sessionDir(session.agent_group_id, session.id), 'inbound.db'), {
+      readonly: true,
+      fileMustExist: true,
+    });
+    const row = db
+      .prepare("SELECT content FROM messages_in WHERE kind = 'task' AND (id = ? OR series_id = ?) ORDER BY seq DESC LIMIT 1")
+      .get(seriesId, seriesId) as { content: string } | undefined;
+    if (!row) return null;
+    const route = (JSON.parse(row.content) as Record<string, unknown>).originRoute as Record<string, unknown> | undefined;
+    if (typeof route !== 'object' || route === null) return null;
+    if (typeof route.channelType !== 'string' || typeof route.platformId !== 'string') return null;
+    if (route.threadId !== null && route.threadId !== undefined && typeof route.threadId !== 'string') return null;
+    return { channelType: route.channelType, platformId: route.platformId, threadId: route.threadId ?? null };
+  } catch (err) {
+    log.debug('slack-ui: could not read task origin route', { err: err instanceof Error ? err.message : String(err) });
+    return null;
+  } finally {
+    db?.close();
+  }
+}
+
+/**
+ * The chat a session's cards and questions go into: its own messaging group, or, for a scheduled
+ * task's run (no messaging group), the chat the task was created from, which must be wired to this
+ * session's agent group. `originThreadId` is the recorded thread for that case. Throws a plain
+ * `Error` with the agent-facing reason when there is no chat.
+ */
+export async function resolveSessionChat(
+  session: Session,
+): Promise<{ mg: MessagingGroup; originThreadId: string | null }> {
+  const noChat = new Error('this session has no chat to post into');
+  if (session.messaging_group_id) {
+    const mg = await getMessagingGroup(session.messaging_group_id);
+    if (!mg) throw noChat;
+    return { mg, originThreadId: null };
+  }
+  const route = readTaskOriginRoute(session);
+  if (!route) throw noChat;
+  const wired = (await getMessagingGroupsByAgentGroup(session.agent_group_id)).filter(
+    (g) => g.channel_type === route.channelType && g.platform_id === route.platformId,
+  );
+  const mg = wired.find((g) => (g.instance ?? g.channel_type) === g.channel_type) ?? wired[0];
+  if (!mg) throw new Error("the task's chat is not wired to this agent");
+  return { mg, originThreadId: route.threadId };
+}
+
 /** First line of an error, without file paths or anything token-shaped, capped for the notice. */
 export function shortMessage(err: unknown): string {
   const first = (err instanceof Error ? err.message : String(err)).split('\n')[0] ?? '';
@@ -187,16 +248,19 @@ async function postCard(content: Record<string, unknown>, session: Session): Pro
   if (typeof cardId !== 'string' || !CARD_ID_RE.test(cardId)) throw new PostCardError('invalid cardId');
   if (typeof templateName !== 'string' || templateName === '') throw new PostCardError('template is required');
 
-  if (!session.messaging_group_id) throw new PostCardError('this session has no chat to post into');
-  const mg = await getMessagingGroup(session.messaging_group_id);
-  if (!mg) throw new PostCardError('this session has no chat to post into');
+  const { mg, originThreadId } = await resolveSessionChat(session).catch((err: Error) => {
+    throw new PostCardError(err.message);
+  });
   if (mg.channel_type !== 'slack') throw new PostCardError('cards can only be posted into a Slack chat');
   const channel = stripSlack(mg.platform_id);
   const instance = mg.instance ?? mg.channel_type;
   const token = envValue(botTokenKeyForInstance(instance));
   if (!token) throw new PostCardError('Slack is not configured for this chat');
 
-  const threadTs = threadTsFor(content.threadId, channel) ?? threadTsFor(session.thread_id, channel);
+  const threadTs =
+    threadTsFor(originThreadId, channel) ??
+    threadTsFor(content.threadId, channel) ??
+    threadTsFor(session.thread_id, channel);
 
   const group = await getAgentGroup(session.agent_group_id);
   if (!group) throw new PostCardError('agent group not found');

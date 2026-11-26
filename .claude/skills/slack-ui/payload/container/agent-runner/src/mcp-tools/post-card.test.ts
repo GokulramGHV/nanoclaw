@@ -102,10 +102,16 @@ describe('post_card dataFile', () => {
     expect(getUndeliveredMessages()).toHaveLength(0);
   });
 
+  it('says a missing file under the root does not exist', async () => {
+    const result = await postCard.handler({ template: 't', dataFile: join(root, 'missing.json') });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toBe('Error: dataFile does not exist');
+  });
+
   it('refuses a file outside the root, a relative path, and a symlink that escapes it', async () => {
     const out = write(outsideDir, 'x.json', '{"secret":"s3cr3t"}');
     symlinkSync(out, join(root, 'link.json'));
-    for (const p of [out, join(root, 'link.json'), 'ok.json', join(root, 'missing.json'), root]) {
+    for (const p of [out, join(root, 'link.json'), 'ok.json', root]) {
       const result = await postCard.handler({ template: 't', dataFile: p });
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toBe('Error: dataFile must be a file under /workspace/agent/');

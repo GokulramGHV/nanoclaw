@@ -13,7 +13,6 @@ import { CardRenderError } from 'slack-ui-kit';
 
 import { botTokenKeyForInstance } from '../../channels/slack-lib.js';
 import { registerDeliveryAction } from '../../delivery.js';
-import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { getSession } from '../../db/sessions.js';
 import { envValue } from '../../env.js';
 import { unguarded } from '../../guard/types.js';
@@ -25,7 +24,7 @@ import type { Session } from '../../types.js';
 import { getCardById, listOpenAskCards } from './db/kit-cards.js';
 import { isDuplicate, noteEventContext, takeEventContext } from './events.js';
 import { kit, registerCardEventHandler } from './kit.js';
-import { readInboundSender, shortMessage, stripSlack, threadTsFor } from './post-card.js';
+import { readInboundSender, resolveSessionChat, shortMessage, stripSlack, threadTsFor } from './post-card.js';
 import { slackClientForToken } from './slack-client.js';
 import { decodeEntities, escapeEntities } from './template.js';
 
@@ -243,16 +242,19 @@ async function ask(content: Obj, session: Session): Promise<void> {
   if (typeof questionId !== 'string' || !QUESTION_ID_RE.test(questionId)) throw new AskError('invalid questionId');
   const spec = parseAskSpec(content);
 
-  if (!session.messaging_group_id) throw new AskError('this session has no chat to post into');
-  const mg = await getMessagingGroup(session.messaging_group_id);
-  if (!mg) throw new AskError('this session has no chat to post into');
+  const { mg, originThreadId } = await resolveSessionChat(session).catch((err: Error) => {
+    throw new AskError(err.message);
+  });
   if (mg.channel_type !== 'slack') throw new AskError('questions can only be asked in a Slack chat');
   const channel = stripSlack(mg.platform_id);
   content.channel = channel;
   const instance = mg.instance ?? mg.channel_type;
   const token = envValue(botTokenKeyForInstance(instance));
   if (!token) throw new AskError('Slack is not configured for this chat');
-  const threadTs = threadTsFor(content.threadId, channel) ?? threadTsFor(session.thread_id, channel);
+  const threadTs =
+    threadTsFor(originThreadId, channel) ??
+    threadTsFor(content.threadId, channel) ??
+    threadTsFor(session.thread_id, channel);
 
   const existing = await getCardById(questionId);
   if (existing) {

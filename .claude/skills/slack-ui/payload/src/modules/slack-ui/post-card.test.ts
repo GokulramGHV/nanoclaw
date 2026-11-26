@@ -12,7 +12,7 @@ vi.mock('../../channels/slack-lib.js', () => ({
 vi.mock('../../env.js', async (orig) => ({ ...(await orig<typeof import('../../env.js')>()), envValue: vi.fn() }));
 vi.mock('./notify.js', () => ({ notifyCardFailure: vi.fn() }));
 vi.mock('../../db/agent-groups.js', () => ({ getAgentGroup: vi.fn() }));
-vi.mock('../../db/messaging-groups.js', () => ({ getMessagingGroup: vi.fn() }));
+vi.mock('../../db/messaging-groups.js', () => ({ getMessagingGroup: vi.fn(), getMessagingGroupsByAgentGroup: vi.fn() }));
 vi.mock('../../group-folder.js', () => ({ resolveGroupFolderPath: vi.fn() }));
 vi.mock('../../session-manager.js', () => ({ sessionDir: vi.fn(), writeSessionMessage: vi.fn() }));
 vi.mock('../../request-wake.js', () => ({ requestWake: vi.fn() }));
@@ -54,7 +54,7 @@ vi.mock('./slack-client.js', () => ({
 
 import { closeDb, initTestDb, runMigrations } from '../../db/index.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
-import { getMessagingGroup } from '../../db/messaging-groups.js';
+import { getMessagingGroup, getMessagingGroupsByAgentGroup } from '../../db/messaging-groups.js';
 import { envValue } from '../../env.js';
 import { getDeliveryAction } from '../../delivery.js';
 import { resolveGroupFolderPath } from '../../group-folder.js';
@@ -740,5 +740,68 @@ describe('readInboundSender row choice', () => {
   it('stops on a notice loop instead of recursing forever', () => {
     seedInbound([chatRow('ask', 'UA'), failNotice('sys-1', 'sys-2'), failNotice('sys-2', 'sys-1')]);
     expect(readInboundSender(session, 'sys-1')).toBe('UA');
+  });
+});
+
+describe('post_card from a scheduled task run', () => {
+  const taskSession: Session = { ...session, id: 'sess-task', messaging_group_id: null, thread_id: 'system:tasks:t-1' };
+  const wiredMg = { id: 'mg-9', channel_type: 'slack', platform_id: 'slack:C999', instance: 'slack' };
+
+  function seedTask(content: Record<string, unknown> | string): void {
+    const db = new Database(path.join(sessDir, 'inbound.db'));
+    db.exec(INBOUND_SCHEMA);
+    db.prepare(
+      "INSERT INTO messages_in (id, seq, kind, timestamp, \"trigger\", content, series_id, status) VALUES ('t-1', 2, 'task', '2026-01-01T00:00:00.000Z', 1, ?, 't-1', 'pending')",
+    ).run(typeof content === 'string' ? content : JSON.stringify(content));
+    db.close();
+  }
+  const route = (over: Record<string, unknown> = {}) => ({
+    prompt: 'p',
+    script: null,
+    originSessionId: 'sess-origin',
+    originRoute: { channelType: 'slack', platformId: 'slack:C999', threadId: 'slack:C999:1699.5', ...over },
+  });
+
+  it('posts into the chat and thread the task was created from', async () => {
+    seedTask(route());
+    vi.mocked(getMessagingGroupsByAgentGroup).mockResolvedValue([wiredMg] as never);
+    await post({ threadId: 'slack:C999:1111.1' }, taskSession);
+    expect(notify).not.toHaveBeenCalled();
+    expect(posts()).toHaveLength(1);
+    expect(posts()[0]!.args).toMatchObject({ channel: 'C999', thread_ts: '1699.5' });
+    expect(getMessagingGroupsByAgentGroup).toHaveBeenCalledWith('ag-1');
+    expect((await getCardById('card-1'))?.owner).toBe('');
+  });
+
+  it('refuses a route to a chat that is not wired to the agent group', async () => {
+    seedTask(route());
+    vi.mocked(getMessagingGroupsByAgentGroup).mockResolvedValue([
+      { ...wiredMg, id: 'mg-8', platform_id: 'slack:COTHER' },
+    ] as never);
+    await post({}, taskSession);
+    expect(posts()).toHaveLength(0);
+    expect(notify).toHaveBeenCalledWith(taskSession, expect.stringMatching(/not wired/), undefined);
+  });
+
+  it('refuses a task that recorded no route, as before', async () => {
+    seedTask({ prompt: 'p', script: null, originSessionId: null });
+    vi.mocked(getMessagingGroupsByAgentGroup).mockResolvedValue([wiredMg] as never);
+    await post({}, taskSession);
+    expect(posts()).toHaveLength(0);
+    expect(notify).toHaveBeenCalledWith(taskSession, expect.stringMatching(/no chat/), undefined);
+  });
+
+  it('ignores a route the container supplies (only the host task row counts)', async () => {
+    seedTask({ prompt: 'p', script: null, originSessionId: null });
+    vi.mocked(getMessagingGroupsByAgentGroup).mockResolvedValue([wiredMg] as never);
+    await post({ originRoute: { channelType: 'slack', platformId: 'slack:C999', threadId: null } }, taskSession);
+    expect(posts()).toHaveLength(0);
+  });
+
+  it('refuses a session that is not a task session and has no chat', async () => {
+    seedTask(route());
+    vi.mocked(getMessagingGroupsByAgentGroup).mockResolvedValue([wiredMg] as never);
+    await post({}, { ...taskSession, thread_id: null });
+    expect(posts()).toHaveLength(0);
   });
 });

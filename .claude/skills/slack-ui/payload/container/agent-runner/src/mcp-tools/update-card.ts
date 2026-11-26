@@ -6,7 +6,7 @@
  * and redraws the same Slack message.
  */
 import { readFileSync, realpathSync, statSync } from 'node:fs';
-import { isAbsolute, sep } from 'node:path';
+import { isAbsolute, resolve, sep } from 'node:path';
 
 import { writeMessageOut } from '../db/messages-out.js';
 import { getCurrentInReplyTo } from '../db/session-state.js';
@@ -32,9 +32,16 @@ function readDataFile(path: string): { data: Record<string, unknown> } | { error
   let root: string;
   try {
     root = realpathSync(dataFileRoot());
-    real = realpathSync(path);
   } catch {
     return { error: outside };
+  }
+  try {
+    real = realpathSync(path);
+  } catch (e) {
+    // A missing file under the root is its own error, so a script that did not write it is easy to tell from a bad path.
+    const lexical = resolve(path);
+    const inRoot = lexical.startsWith(root + sep) || lexical.startsWith(resolve(dataFileRoot()) + sep);
+    return { error: (e as NodeJS.ErrnoException).code === 'ENOENT' && inRoot ? 'dataFile does not exist' : outside };
   }
   if (real !== root && !real.startsWith(root + sep)) return { error: outside };
   let text: string;
