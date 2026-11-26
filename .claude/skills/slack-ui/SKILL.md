@@ -42,6 +42,7 @@ The host stores each card in a `ui_kit_cards` table in the central database.
 - Slack must be installed with `/add-slack` first. This skill uses its Slack client.
 - NanoClaw's click and form-submit handler seams must be present in `src/channels/question-render-registry.ts`.
 - The agent-runner needs the message-claim and tool-hiding seams (`container/agent-runner/src/message-claims.ts`, and `hideTool` in `container/agent-runner/src/mcp-tools/server.ts`). `ask` uses both.
+- NanoClaw's CLI registry must export `allowAtGroupScope` (`src/cli/registry.ts`). The `ncl slack-users` command uses it.
 - The Slack app needs the `chat:write` scope. It needs `usergroups:read` only if a template or an `ask` call uses a user-group rule.
 
 Check the code prerequisites. Each line must succeed; if one fails, stop and install what it names:
@@ -52,6 +53,7 @@ grep -q "export function registerQuestionActionHandler" src/channels/question-re
 grep -q "export function registerModalSubmitHandler" src/channels/question-render-registry.ts || { echo "slack-ui needs the form-submit seam (registerModalSubmitHandler) in src/channels/question-render-registry.ts" >&2; exit 1; }
 test -f container/agent-runner/src/message-claims.ts || { echo "slack-ui needs the message-claim seam: container/agent-runner/src/message-claims.ts" >&2; exit 1; }
 grep -q "export function hideTool" container/agent-runner/src/mcp-tools/server.ts || { echo "slack-ui needs hideTool in container/agent-runner/src/mcp-tools/server.ts" >&2; exit 1; }
+grep -q "export function allowAtGroupScope" src/cli/registry.ts || { echo "slack-ui needs allowAtGroupScope in src/cli/registry.ts" >&2; exit 1; }
 ```
 
 ## Install
@@ -99,6 +101,8 @@ payload/src/modules/slack-ui/update-card.test.ts -> src/modules/slack-ui/update-
 payload/src/modules/slack-ui/update-card.ts -> src/modules/slack-ui/update-card.ts
 payload/src/modules/slack-ui/registration.test.ts -> src/modules/slack-ui/registration.test.ts
 payload/src/modules/slack-ui/slack-client.test.ts -> src/modules/slack-ui/slack-client.test.ts
+payload/src/modules/slack-ui/slack-users.test.ts -> src/modules/slack-ui/slack-users.test.ts
+payload/src/modules/slack-ui/slack-users.ts -> src/modules/slack-ui/slack-users.ts
 payload/src/modules/slack-ui/slack-client.ts -> src/modules/slack-ui/slack-client.ts
 payload/src/modules/slack-ui/telemetry.ts -> src/modules/slack-ui/telemetry.ts
 payload/src/modules/slack-ui/template.test.ts -> src/modules/slack-ui/template.test.ts
@@ -301,6 +305,13 @@ A template with `version: 1`, or no version, is the old JSON block format. `post
 3. Move each control's `who` rule into `access.byId`, keyed by the control's statement name. Every action button locks the card by default and sends an event; there is no per-control `submit` or `notify` setting.
 
 `examples/cards/` holds the two demo templates written this way.
+
+## Looking up a Slack user by email
+
+`ncl slack-users lookup --email <addr>` turns a work email into a Slack user id, so an agent can mention a person or name them on a card. The host makes the call with the bot token of the Slack app the agent's chat runs on; the agent never sees a token. It returns `{ id, name, real_name }` for an active person and nothing else (no email, profile, phone or title). A missing, deactivated, bot or app user answers "no active Slack user with that email".
+
+- The Slack app needs the `users:read` and `users:read.email` scopes. Without `users:read.email` the command says so.
+- It is read only, needs no approval, and is allowed at `cli_scope=group`. It works only from a Slack chat. From the host, pass `--instance <name>` (for example `slack`).
 
 ## Troubleshooting
 

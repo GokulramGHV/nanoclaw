@@ -6,6 +6,7 @@
 - Pass the template name and its data only. The layout and who may press each control come from the template; you cannot change them.
 - The person you are answering becomes the card's owner.
 - To post an updated version of a card, pass the id of the most recent version (from the post result or its `card_event`) as `replaces`. The old card closes and only the newest can be pressed.
+- To mention or name a person you only know by email, get their Slack user id with `ncl slack-users lookup --email <addr>` (when `ncl` is available to you); it returns `id`, `name` and `real_name`.
 - Never retype numbers that came from a tool. Pass them through in `data` exactly as the tool returned them.
 - The call returns at once. Presses arrive later as `<webhook source="slack-ui" event="card_event">` messages. Do not wait for them.
 - A `card_event` payload has `cardId`, `template`, `control` (the control's name in the template), `value`, `user` (`{ id, name }`), `state` and `locked`. `state` holds the card's current values by name (for example `state.pick`), so a submit event carries the final ticks and inputs. For a form submit, `value` is an object of the submitted values by name. `locked` is `true` when that press closed the card.
