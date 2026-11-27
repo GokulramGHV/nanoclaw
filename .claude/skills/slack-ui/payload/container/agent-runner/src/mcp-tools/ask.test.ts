@@ -165,6 +165,80 @@ describe('ask wait', () => {
   });
 });
 
+describe('ask ends early', () => {
+  const THREAD = 'slack:C1:111.000';
+  let seq = 100;
+
+  function setRouting() {
+    getInboundDb().exec(
+      'CREATE TABLE IF NOT EXISTS session_routing (id INTEGER PRIMARY KEY CHECK (id = 1), channel_type TEXT, platform_id TEXT, thread_id TEXT)',
+    );
+    getInboundDb()
+      .prepare(
+        "INSERT OR REPLACE INTO session_routing (id, channel_type, platform_id, thread_id) VALUES (1, 'slack', 'slack:C1', NULL)",
+      )
+      .run();
+  }
+
+  function insertChat(id: string, threadId: string | null, trigger = 1, sender = 'Gokul') {
+    seq += 2;
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, seq, kind, timestamp, status, trigger, platform_id, channel_type, thread_id, content)
+         VALUES (?, ?, 'chat', datetime('now'), 'pending', ?, 'slack:C1', 'slack', ?, ?)`,
+      )
+      .run(id, seq, trigger, threadId, JSON.stringify({ sender, text: 'hi' }));
+  }
+
+  function closeRequests(): string[] {
+    return getUndeliveredMessages()
+      .map((m) => JSON.parse(m.content))
+      .filter((c) => c.action === 'ask_close')
+      .map((c) => c.questionId);
+  }
+
+  it('a chat message in the card thread ends the wait and asks the host to close the card', async () => {
+    setRouting();
+    insertChat('m-before', THREAD); // the message being answered: not a reply to the card
+    const waiting = ask.handler({ questions: [q()] });
+    const questionId = await waitForQuestionId();
+    expect(JSON.parse(getUndeliveredMessages()[0].content).threadId).toBe(THREAD);
+    insertChat('m-reply', THREAD);
+    const result = await waiting;
+    expect(result.isError).not.toBe(true);
+    expect(result.content[0].text).toContain('Gokul replied in the thread instead of answering');
+    expect(closeRequests()).toEqual([questionId]);
+    expect(isMessageClaimed(`ask-${questionId}`)).toBe(false);
+    // the reply itself is left for the poll loop
+    expect(getPendingMessages().some((m) => m.id === 'm-reply')).toBe(true);
+  });
+
+  it('ignores messages in another thread and messages not addressed to the agent', async () => {
+    setRouting();
+    insertChat('m-before', THREAD);
+    askSettings.timeoutScale = 0.002; // 30 s -> 60 ms
+    const waiting = ask.handler({ questions: [q()], timeout: 30 });
+    const questionId = await waitForQuestionId();
+    insertChat('m-other-thread', 'slack:C1:999.000');
+    await Bun.sleep(15);
+    insertChat('m-ambient', THREAD, 0);
+    const result = await waiting;
+    expect(result.content[0].text).toContain('No answer after 30s');
+    expect(closeRequests()).toEqual([]);
+    expect(isMessageClaimed(`ask-${questionId}`)).toBe(false);
+  });
+
+  it('returns a cancel without an error flag', async () => {
+    const waiting = ask.handler({ questions: [q()] });
+    const questionId = await waitForQuestionId();
+    insertAnswer(questionId, { user: { id: 'U1234567', name: 'ann' }, cancelled: true });
+    const result = await waiting;
+    expect(result.isError).not.toBe(true);
+    expect(result.content[0].text).toContain('<@U1234567> cancelled the question without answering');
+    releaseMessage(`ask-${questionId}`);
+  });
+});
+
 describe('ask and ask_user_question visibility', () => {
   async function listed(channelType: string | null): Promise<string[]> {
     getInboundDb().exec(
