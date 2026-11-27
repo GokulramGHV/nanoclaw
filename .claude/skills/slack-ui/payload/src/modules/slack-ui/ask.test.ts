@@ -57,7 +57,7 @@ import { requestWake } from '../../request-wake.js';
 import { sessionDir, writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 import { getCardById } from './db/kit-cards.js';
-import { askAccess, buildAskCard, handleAsk, parseAskSpec, writeAskAnswer, type AskSpecQuestion } from './ask.js';
+import { askAccess, buildAskCard, handleAsk, handleAskClose, parseAskSpec, writeAskAnswer, type AskSpecQuestion } from './ask.js';
 import './index.js';
 import { noteEventContext } from './events.js';
 import { kit, routeCardEvent } from './kit.js';
@@ -142,6 +142,7 @@ afterEach(async () => {
 describe('registration', () => {
   it('registers ask as a delivery action', () => {
     expect(getDeliveryAction('ask')).toBe(handleAsk);
+    expect(getDeliveryAction('ask_close')).toBe(handleAskClose);
   });
 });
 
@@ -214,10 +215,11 @@ describe('buildAskCard', () => {
 
 describe('askAccess', () => {
   it('maps who to rules', () => {
-    expect(askAccess(undefined, 'U1')).toEqual({ default: 'owner' });
-    expect(askAccess({ users: ['U2', 'U1'] }, 'U1')).toEqual({ default: { users: ['U1', 'U2'] } });
-    expect(askAccess({ users: ['U2'] }, '')).toEqual({ default: { users: ['U2'] } });
-    expect(askAccess({ group: 'S1234567' }, 'U1')).toEqual({ default: { group: 'S1234567' } });
+    const lock = { ids: ['send'] };
+    expect(askAccess(undefined, 'U1')).toEqual({ default: 'owner', lock });
+    expect(askAccess({ users: ['U2', 'U1'] }, 'U1')).toEqual({ default: { users: ['U1', 'U2'] }, lock });
+    expect(askAccess({ users: ['U2'] }, '')).toEqual({ default: { users: ['U2'] }, lock });
+    expect(askAccess({ group: 'S1234567' }, 'U1')).toEqual({ default: { group: 'S1234567' }, lock });
   });
 });
 
@@ -492,5 +494,79 @@ describe('ask from a scheduled task run', () => {
     seedTask(null);
     await handleAsk(content({ who: { users: ['U2345678'] } }), taskSession as never);
     expect(posts()).toHaveLength(0);
+  });
+});
+
+describe('cancel and close', () => {
+  const POSTED_TS = '1700000000.000200';
+  const click = (user: string, actionId: string) => ({
+    type: 'block_actions',
+    user: { id: user, name: 'ann' },
+    channel: { id: 'C123' },
+    message: { ts: POSTED_TS },
+    trigger_id: 't',
+    actions: [{ action_id: actionId, type: 'button', block_id: 'b', value: '' }],
+  });
+  const client = () => ({
+    chat: {
+      update: async (args: unknown) => {
+        fake.calls.push({ method: 'chat.update', args });
+        return { ok: true };
+      },
+      postEphemeral: async (args: unknown) => {
+        fake.calls.push({ method: 'chat.postEphemeral', args });
+        return { ok: true };
+      },
+    },
+  });
+  const press = async (user: string, actionId: string) => {
+    const r: any = await kit.handleAction(client() as never, click(user, actionId));
+    await r?.done;
+  };
+
+  it('the card has a Cancel button next to Send', async () => {
+    const { source, state } = buildAskCard([question()]);
+    const rendered = JSON.stringify(await kit.render(source, state));
+    expect(rendered).toContain('"action_id":"send"');
+    expect(rendered).toContain('"action_id":"cancel"');
+  });
+
+  it('Cancel with nothing picked closes the card and tells the agent once', async () => {
+    await handleAsk(content(), session);
+    expect((await getCardById('q-1'))?.ts).toBe(POSTED_TS);
+    noteEventContext('C123', POSTED_TS, 'U9', { actionTs: '5.5', userName: 'ann' });
+    await press('U9', 'cancel');
+    expect((await getCardById('q-1'))?.locked).toMatchObject({ note: 'Cancelled by ann.' });
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(rowOf().payload).toEqual({ questionId: 'q-1', user: { id: 'U9', name: 'ann' }, cancelled: true });
+    expect(requestWake).toHaveBeenCalledTimes(1);
+    await press('U9', 'cancel'); // a locked card refuses the second press
+    await press('U9', 'send');
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  it('Send with nothing picked is still refused', async () => {
+    await handleAsk(content(), session);
+    await press('U9', 'send');
+    expect((await getCardById('q-1'))?.locked).toBeUndefined();
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('only someone allowed to answer can cancel', async () => {
+    await handleAsk(content(), session);
+    await press('U7', 'cancel');
+    expect((await getCardById('q-1'))?.locked).toBeUndefined();
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('ask_close closes only an open card from the same session, without an answer', async () => {
+    await handleAsk(content(), session);
+    await handleAskClose({ questionId: 'q-1' }, { ...session, id: 'sess-other' });
+    expect((await getCardById('q-1'))?.locked).toBeUndefined();
+    await handleAskClose({ questionId: 'q-1' }, session);
+    expect((await getCardById('q-1'))?.locked).toMatchObject({ note: 'Answered in the thread.' });
+    expect(write).not.toHaveBeenCalled();
+    await expect(handleAskClose({ questionId: 'missing' }, session)).resolves.toBeUndefined();
+    await expect(handleAskClose({ questionId: '../x' }, session)).resolves.toBeUndefined();
   });
 });

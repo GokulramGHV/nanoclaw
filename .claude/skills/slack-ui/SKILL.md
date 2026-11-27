@@ -32,6 +32,8 @@ This skill adds three tools for agents, `post_card`, `update_card` and `ask`, an
 - The agent calls `ask({ questions, who?, timeout? })`. One card carries up to 4 questions. Each question has 2 to 10 options, each with an optional short description, and can allow several choices (`multiSelect`) or a typed answer (`allowOther`).
 - By default only the person the agent is answering may answer. `who.users` adds other users to that person. `who.group` replaces the person: only members of that Slack user group may answer, and the asker only if a member.
 - One Send button locks the card. It is refused with a private note until every question has an answer.
+- A Cancel button next to Send closes the card without an answer, even when nothing is picked. Anyone who may answer may cancel. The card shows "Cancelled by <name>." and the agent is told the question was cancelled.
+- If someone sends the agent a message in the card's thread while the call waits, the call returns at once, the card closes with "Answered in the thread.", and the agent reads that message next. Messages in other threads, and messages not addressed to the agent, do not end the wait.
 - The tool waits up to `timeout` seconds (30 to 300, default 300) and returns the answer as text. If nobody answers in time, the card stays open and a late answer arrives as a normal `ask_answer` message that wakes the agent.
 - In a Slack chat `ask` replaces `ask_user_question`, which is hidden there. Other channels keep `ask_user_question` and do not see `ask`.
 
@@ -293,6 +295,7 @@ An `ask` card sends no `card_event`. Its answer is an `ask_answer` message, with
 - `user`: `{ id, name }` of the person who answered.
 - `answers`: one entry per question, in order: `{ question, selected, other }`, where `selected` is a list of option labels and `other` is the typed text (when `allowOther` was set).
 - `failed`: instead of the above, a short reason when the card could not be posted.
+- `cancelled: true`: instead of `answers`, when `user` pressed Cancel.
 
 While the agent's `ask` call waits, it receives the same answer as the tool result and no message is sent. After the call timed out, the answer arrives as the message. A `failed` message that arrives after a timeout means the card was never shown.
 

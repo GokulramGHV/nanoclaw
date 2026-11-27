@@ -9,13 +9,19 @@
  * well; after a timeout the claim is released and a late answer arrives as an
  * ordinary message.
  *
+ * The wait also ends when someone sends the agent a message in the card's
+ * thread instead of answering. The poll loop hands that message to the agent
+ * as usual; the tool only notices it, asks the host to close the card
+ * (`ask_close`), and returns.
+ *
  * In a Slack chat `ask_user_question` is hidden and this tool is shown; in any
  * other chat the reverse.
  */
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import { getMessageIn, markCompleted } from '../db/messages-in.js';
+import { getMessageIn, markCompleted, type MessageInRow } from '../db/messages-in.js';
+import { getAgentMailbox } from '../mailbox/index.js';
 import { writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting, resolveDestinationThread } from '../db/session-routing.js';
 import { getCurrentInReplyTo, getCurrentReplyRoute } from '../db/session-state.js';
@@ -173,6 +179,31 @@ function isSlack(): boolean {
   }
 }
 
+/** The newest inbound row in this chat, or undefined. Never throws. */
+function latestInChat(channelType: string, platformId: string): MessageInRow | undefined {
+  try {
+    const latest = getAgentMailbox().operations.getLatestInboundRoute(channelType, platformId);
+    return latest ? getMessageIn(latest.inReplyTo) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A chat message to the agent in the card's thread (or, for a card outside a thread, outside any thread). */
+function isReplyInThread(row: MessageInRow, threadId: string | null): boolean {
+  return (row.kind === 'chat' || row.kind === 'chat-sdk') && row.trigger === 1 && (row.thread_id ?? null) === (threadId ?? null);
+}
+
+function senderOf(row: MessageInRow): string {
+  try {
+    const content = JSON.parse(row.content) as { sender?: unknown; author?: { fullName?: unknown } };
+    const name = content.sender || content.author?.fullName;
+    return typeof name === 'string' && name ? name : 'Someone';
+  } catch {
+    return 'Someone';
+  }
+}
+
 type Answer = { question?: unknown; selected?: unknown; other?: unknown };
 
 function answerText(payload: Record<string, unknown>): string {
@@ -252,6 +283,14 @@ export const ask: McpToolDefinition = {
 
     const questionId = randomUUID();
     const messageId = `ask-${questionId}`;
+    const route = routing();
+    const chat =
+      route.channel_type && route.platform_id
+        ? { channelType: route.channel_type, platformId: route.platform_id, threadId: route.thread_id ?? null }
+        : undefined;
+    // Rows up to this one were there before the question; only newer ones can be a reply to it.
+    let seenId = chat ? latestInChat(chat.channelType, chat.platformId)?.id : undefined;
+
     // Claim before the card exists, so the answer can never reach the agent first.
     claimMessage(messageId);
     // The claim is released only when the wait ends without an answer. An answer is
@@ -267,7 +306,7 @@ export const ask: McpToolDefinition = {
           questionId,
           questions: input.questions,
           who: input.who ?? null,
-          threadId: routing().thread_id,
+          threadId: route.thread_id,
           inReplyTo: getCurrentInReplyTo(),
         }),
       });
@@ -291,8 +330,24 @@ export const ask: McpToolDefinition = {
           // fall through: an unreadable answer is reported below
         }
         if (typeof payload.failed === 'string') return err(`The question card could not be posted: ${payload.failed}`);
+        if (payload.cancelled === true) return ok(cancelledText(payload));
         if (!Array.isArray(payload.answers)) return err('The answer could not be read.');
         return ok(answerText(payload));
+      }
+      if (chat) {
+        const latest = latestInChat(chat.channelType, chat.platformId);
+        if (latest && latest.id !== seenId && latest.id !== messageId) {
+          seenId = latest.id;
+          if (isReplyInThread(latest, chat.threadId)) {
+            releaseMessage(messageId);
+            await closeCard(questionId);
+            return ok(
+              `${senderOf(latest)} replied in the thread instead of answering, so the question card is now closed. ` +
+                'Their message comes next in this conversation: read it and act on it. ' +
+                'Ask again only if it leaves the question unanswered.',
+            );
+          }
+        }
       }
       try {
         await sleep(askSettings.pollMs, undefined, context ? { signal: context.signal } : undefined);
@@ -307,6 +362,27 @@ export const ask: McpToolDefinition = {
     );
   },
 };
+
+/** Ask the host to close the card. A failure only leaves the card open, so it is logged, never thrown. */
+async function closeCard(questionId: string): Promise<void> {
+  try {
+    await writeMessageOut({
+      id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      kind: 'system',
+      content: JSON.stringify({ action: 'ask_close', questionId }),
+    });
+  } catch (e) {
+    log(`ask: could not ask the host to close ${questionId}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+function cancelledText(payload: Record<string, unknown>): string {
+  const user = isObj(payload.user) && typeof payload.user.id === 'string' ? payload.user.id : 'unknown';
+  return (
+    `<@${user}> cancelled the question without answering. ` +
+    'Carry on without this answer: do what you can, or say what you need. Do not post the same question again.'
+  );
+}
 
 registerTools([ask]);
 hideTool('ask_user_question', isSlack);

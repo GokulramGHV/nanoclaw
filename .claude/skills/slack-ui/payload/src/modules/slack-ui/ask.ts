@@ -168,21 +168,34 @@ export function buildAskCard(questions: AskSpecQuestion[]): {
   const source = [
     `root = Root([${children.join(', ')}])`,
     '$sent = false',
+    '$cancelled = false',
     ...lines,
-    'acts = Actions([send])',
+    'acts = Actions([send, cancel])',
     'send = Button("Send", Action([@Set($sent, true)]), "primary")',
+    'cancel = Button("Cancel", Action([@Set($cancelled, true)]))',
   ].join('\n');
   return { source, state, required };
 }
 
-/** Who may answer. The asker (`owner`) is left out of a users list when unknown. */
+/**
+ * Who may answer. The asker (`owner`) is left out of a users list when unknown.
+ * Only Send locks the card: Cancel must work before anything is picked, so it
+ * does not lock and is not held to the required answers; its handler closes the card.
+ */
 export function askAccess(who: AskSpecWho | undefined, owner: string): Access {
-  if (who?.group) return { default: { group: who.group } };
+  const lock = { ids: ['send'] };
+  if (who?.group) return { default: { group: who.group }, lock };
   if (who?.users) {
     const users = [...new Set([...(owner ? [owner] : []), ...who.users])];
-    return { default: { users } };
+    return { default: { users }, lock };
   }
-  return { default: 'owner' };
+  return { default: 'owner', lock };
+}
+
+/** The Slack client for a card's meta.instance, or undefined when that bot has no token. */
+function clientForInstance(instance: unknown): ReturnType<typeof slackClientForToken> | undefined {
+  const token = typeof instance === 'string' && instance ? envValue(botTokenKeyForInstance(instance)) : undefined;
+  return token ? slackClientForToken(token) : undefined;
 }
 
 async function writeAskRow(
@@ -350,9 +363,13 @@ function chosenLabels(value: unknown, options: string[]): string[] {
   return labels;
 }
 
-/** Only the press that locked the card is an answer. */
+/**
+ * Only the press that locked the card is an answer. Cancel does not lock: it
+ * closes the card here and, when this press closed it, tells the agent.
+ */
 export async function writeAskAnswer(event: CardEvent, _stored?: CardRecord): Promise<void> {
-  if (!event.locked) return;
+  const cancel = !event.locked && event.control.id === 'cancel';
+  if (!event.locked && !cancel) return;
   const questionId = event.meta?.questionId;
   const sessionId = event.meta?.sessionId;
   const agentGroupId = event.meta?.agentGroupId;
@@ -372,6 +389,10 @@ export async function writeAskAnswer(event: CardEvent, _stored?: CardRecord): Pr
     return;
   }
   const ctx = takeEventContext(event.card.channel, event.card.ts, event.user);
+  if (cancel) {
+    await cancelAsk(event, session, questionId, ctx?.userName ?? '');
+    return;
+  }
   const answers = questions.map((q, i) => {
     const other = stateValue(event.state, `q${i}_other`);
     const otherText = typeof other === 'string' ? decodeEntities(other).trim() : '';
@@ -399,7 +420,55 @@ export async function writeAskAnswer(event: CardEvent, _stored?: CardRecord): Pr
   }
 }
 
+/** Close the card for a Cancel press; only the press that closed it writes the answer row. */
+async function cancelAsk(event: CardEvent, session: Session, questionId: string, userName: string): Promise<void> {
+  const client = clientForInstance(event.meta?.instance);
+  if (!client) {
+    log.warn('slack-ui: ask cancel without a Slack token, card left open', { questionId });
+    return;
+  }
+  const closed = await kit.closeCard(client, event.card.channel, event.card.ts, {
+    note: userName ? `Cancelled by ${userName}.` : 'Cancelled.',
+  });
+  if (!closed) return; // already answered, cancelled or closed
+  await writeAskRow(
+    session,
+    {
+      channel: event.card.channel,
+      threadId: event.card.threadTs ? `slack:${event.card.channel}:${event.card.threadTs}` : null,
+    },
+    questionId,
+    { user: { id: event.user, name: userName }, cancelled: true },
+    true,
+  );
+}
+
+/**
+ * `ask_close` delivery action: the container stopped waiting because someone
+ * replied in the chat instead. Close the session's own card so it can't be
+ * answered twice. A missing, foreign or already locked card is left alone.
+ */
+export async function handleAskClose(content: Obj, session: Session): Promise<void> {
+  const { questionId } = content;
+  if (typeof questionId !== 'string' || !QUESTION_ID_RE.test(questionId)) return;
+  try {
+    const card = await getCardById(questionId);
+    if (!card || card.meta?.sessionId !== session.id || card.meta?.kind !== 'ask') return;
+    const client = clientForInstance(card.meta?.instance);
+    if (!client) return;
+    await kit.closeCard(client, card.channel, card.ts, { note: 'Answered in the thread.' });
+  } catch (err) {
+    log.warn('slack-ui: could not close an ask card', { questionId, err: String(err) });
+  }
+}
+
 registerCardEventHandler('ask', writeAskAnswer);
+
+registerDeliveryAction(
+  'ask_close',
+  handleAskClose,
+  unguarded("closes only a question card that this same session posted; it can't open, post or answer anything"),
+);
 
 registerDeliveryAction(
   'ask',
