@@ -191,7 +191,7 @@ function latestInChat(channelType: string, platformId: string): MessageInRow | u
 
 /** A chat message to the agent in the card's thread (or, for a card outside a thread, outside any thread). */
 function isReplyInThread(row: MessageInRow, threadId: string | null): boolean {
-  return row.kind === 'chat' && row.trigger === 1 && (row.thread_id ?? null) === (threadId ?? null);
+  return (row.kind === 'chat' || row.kind === 'chat-sdk') && row.trigger === 1 && (row.thread_id ?? null) === (threadId ?? null);
 }
 
 function senderOf(row: MessageInRow): string {

@@ -4,7 +4,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 
 import { getInboundDb, getOutboundDb, closeSessionDb, initTestSessionDb } from '../mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';
-import { getPendingMessages } from '../db/messages-in.js';
+import { getPendingMessages, markCompleted, markProcessing } from '../db/messages-in.js';
 import { isMessageClaimed, releaseMessage } from '../message-claims.js';
 import { ask, askSettings, parseAskInput } from './ask.js';
 import { createMcpServer, registerTools } from './server.js';
@@ -180,12 +180,20 @@ describe('ask ends early', () => {
       .run();
   }
 
+  // Slack messages arrive as kind chat-sdk; wake-context rows written just before them have no chat.
   function insertChat(id: string, threadId: string | null, trigger = 1, sender = 'Gokul') {
     seq += 2;
     getInboundDb()
       .prepare(
+        `INSERT INTO messages_in (id, seq, kind, timestamp, status, trigger, content)
+         VALUES (?, ?, 'chat', datetime('now'), 'pending', 0, '{}')`,
+      )
+      .run(`${id}-context`, seq);
+    seq += 2;
+    getInboundDb()
+      .prepare(
         `INSERT INTO messages_in (id, seq, kind, timestamp, status, trigger, platform_id, channel_type, thread_id, content)
-         VALUES (?, ?, 'chat', datetime('now'), 'pending', ?, 'slack:C1', 'slack', ?, ?)`,
+         VALUES (?, ?, 'chat-sdk', datetime('now'), 'pending', ?, 'slack:C1', 'slack', ?, ?)`,
       )
       .run(id, seq, trigger, threadId, JSON.stringify({ sender, text: 'hi' }));
   }
@@ -211,6 +219,19 @@ describe('ask ends early', () => {
     expect(isMessageClaimed(`ask-${questionId}`)).toBe(false);
     // the reply itself is left for the poll loop
     expect(getPendingMessages().some((m) => m.id === 'm-reply')).toBe(true);
+  });
+
+  it('still ends the wait when the poll loop already handed the reply to the agent', async () => {
+    setRouting();
+    insertChat('m-before', THREAD);
+    const waiting = ask.handler({ questions: [q()] });
+    const questionId = await waitForQuestionId();
+    insertChat('m-reply', THREAD);
+    markProcessing(['m-reply']);
+    markCompleted(['m-reply']);
+    const result = await waiting;
+    expect(result.content[0].text).toContain('replied in the thread instead of answering');
+    expect(closeRequests()).toEqual([questionId]);
   });
 
   it('ignores messages in another thread and messages not addressed to the agent', async () => {
